@@ -1,5 +1,4 @@
-# CreditLensAI
-Minor project
+
 
 # CreditLens AI
 

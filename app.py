@@ -326,26 +326,186 @@ def demo_data():
 # ANALYSIS PIPELINE
 # ============================================================
 
+def normalize_columns(df):
+    """
+    Accept common alternative names so users do not need to prepare
+    the exact CreditLens column names.
+    """
+    df = df.copy()
+
+    aliases = {
+        "revenue": "monthly_revenue",
+        "monthly sales": "monthly_revenue",
+        "sales": "monthly_revenue",
+        "income": "monthly_revenue",
+        "monthly income": "monthly_revenue",
+
+        "expenses": "monthly_expenses",
+        "monthly expense": "monthly_expenses",
+        "costs": "monthly_expenses",
+        "monthly costs": "monthly_expenses",
+
+        "debt": "total_debt",
+        "loan": "total_debt",
+        "total loan": "total_debt",
+        "outstanding debt": "total_debt",
+
+        "emi": "monthly_emi",
+        "monthly loan payment": "monthly_emi",
+        "loan payment": "monthly_emi",
+
+        "balance": "average_balance",
+        "bank balance": "average_balance",
+        "average bank balance": "average_balance",
+
+        "late payments": "late_payment_count",
+        "late payment count": "late_payment_count",
+        "delayed payments": "late_payment_count",
+
+        "transactions": "total_transactions",
+        "transaction count": "total_transactions",
+
+        "average transaction": "avg_transaction_value",
+        "avg transaction": "avg_transaction_value",
+        "average transaction value": "avg_transaction_value",
+
+        "revenue growth": "revenue_growth",
+        "sales growth": "revenue_growth",
+
+        "expense growth": "expense_growth",
+
+        "cash flow volatility": "cashflow_volatility",
+        "cashflow volatility": "cashflow_volatility",
+
+        "credit utilization": "credit_utilization",
+        "credit utilisation": "credit_utilization",
+        "utilization": "credit_utilization",
+        "utilisation": "credit_utilization"
+    }
+
+    rename_map = {}
+
+    for col in df.columns:
+        clean = str(col).strip().lower().replace("_", " ")
+        if clean in aliases:
+            rename_map[col] = aliases[clean]
+
+    df.rename(columns=rename_map, inplace=True)
+
+    return df
+
+
 def analyze_data(input_df):
-    df = input_df.copy()
+    """
+    Flexible analysis:
+    - accepts a complete dataset
+    - accepts a partial dataset
+    - accepts common alternative column names
+    - creates engineered fields internally
+    - fills unavailable model inputs with transparent estimates
+    - reports data completeness so users know prediction confidence
+    """
 
-    missing = [c for c in BASE_FEATURES if c not in df.columns]
-    if missing:
-        return None, "MISSING", missing
+    df = normalize_columns(input_df)
 
-    df[BASE_FEATURES] = df[BASE_FEATURES].apply(
-        pd.to_numeric, errors="coerce"
+    # A completely empty dataset cannot be analyzed.
+    if df.empty:
+        return None, "EMPTY", None
+
+    # Numeric conversion for columns that are supplied.
+    supplied_base = [
+        c for c in BASE_FEATURES
+        if c in df.columns
+    ]
+
+    for col in supplied_base:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Remove rows where all supplied financial values are missing.
+    if supplied_base:
+        df = df.dropna(
+            how="all",
+            subset=supplied_base
+        ).reset_index(drop=True)
+
+    if df.empty:
+        return None, "NO_FINANCIAL_DATA", None
+
+    # --------------------------------------------------------
+    # Flexible defaults
+    #
+    # These are prototype fallback values, not real borrower
+    # facts. They allow partial datasets to be scored while
+    # keeping a data-completeness indicator.
+    # --------------------------------------------------------
+
+    defaults = {
+        "monthly_revenue": 500000,
+        "monthly_expenses": 350000,
+        "total_debt": 800000,
+        "monthly_emi": 60000,
+        "average_balance": 300000,
+        "late_payment_count": 0,
+        "total_transactions": 80,
+        "avg_transaction_value": 7500,
+        "revenue_growth": 0.05,
+        "expense_growth": 0.05,
+        "cashflow_volatility": 0.30,
+        "credit_utilization": 0.50
+    }
+
+    # Track what the user actually supplied.
+    original_supplied = set(
+        c for c in BASE_FEATURES
+        if c in df.columns
     )
 
-    if df[BASE_FEATURES].isna().any().any():
-        return None, "INVALID", None
+    estimated_columns = []
+
+    for col in BASE_FEATURES:
+        if col not in df.columns:
+            df[col] = defaults[col]
+            estimated_columns.append(col)
+        else:
+            missing_values = df[col].isna()
+
+            if missing_values.any():
+                df.loc[missing_values, col] = defaults[col]
+
+                if col not in estimated_columns:
+                    estimated_columns.append(col)
+
+    # --------------------------------------------------------
+    # Keep user/business identifier when available.
+    # --------------------------------------------------------
+
+    if "business_id" not in df.columns:
+        if "id" in df.columns:
+            df["business_id"] = df["id"].astype(str)
+        else:
+            df["business_id"] = [
+                f"SME-{i + 1:04d}"
+                for i in range(len(df))
+            ]
+
+    # --------------------------------------------------------
+    # Create the exact engineered features expected by the model.
+    # --------------------------------------------------------
 
     df = engineer_features(df)
+
+    # --------------------------------------------------------
+    # ML prediction
+    # --------------------------------------------------------
 
     X = df[MODEL_FEATURES]
 
     df["ml_prediction"] = model.predict(X)
     df["ml_probability"] = model.predict_proba(X)[:, 1]
+
+    # --------------------------------------------------------
+    # CreditLens scores
+    # --------------------------------------------------------
 
     df["credit_score"] = df.apply(
         calculate_credit_score,
@@ -361,7 +521,35 @@ def analyze_data(input_df):
         axis=1
     )
 
+    # --------------------------------------------------------
+    # Data completeness / confidence indicator
+    # --------------------------------------------------------
+
+    supplied_count = len(original_supplied)
+    total_base = len(BASE_FEATURES)
+
+    completeness = round(
+        (supplied_count / total_base) * 100,
+        1
+    )
+
+    df["data_completeness"] = completeness
+
+    if completeness >= 90:
+        confidence = "High"
+    elif completeness >= 60:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    df["prediction_confidence"] = confidence
+
+    # --------------------------------------------------------
+    # Batch anomaly detection
+    # --------------------------------------------------------
+
     if len(df) >= 5:
+
         anomaly_features = [
             "monthly_revenue",
             "monthly_expenses",
@@ -372,7 +560,10 @@ def analyze_data(input_df):
         ]
 
         anomaly_model = IsolationForest(
-            contamination=min(0.05, max(1 / len(df), 0.01)),
+            contamination=min(
+                0.05,
+                max(1 / len(df), 0.01)
+            ),
             random_state=42
         )
 
@@ -380,14 +571,22 @@ def analyze_data(input_df):
             df[anomaly_features]
         )
 
-        df["anomaly_status"] = df["anomaly_prediction"].map({
+        df["anomaly_status"] = df[
+            "anomaly_prediction"
+        ].map({
             1: "Normal",
             -1: "Anomaly"
         })
+
     else:
         df["anomaly_status"] = "Need 5+ records"
 
-    return df, "OK", None
+    return df, "OK", {
+        "supplied_columns": sorted(original_supplied),
+        "estimated_columns": estimated_columns,
+        "completeness": completeness,
+        "confidence": confidence
+    }
 
 
 # ============================================================
@@ -459,23 +658,36 @@ if uploaded_file is not None:
             input_df = pd.read_csv(uploaded_file)
             analyzed, status, details = analyze_data(input_df)
 
-            if status == "MISSING":
+            if status in ["EMPTY", "NO_FINANCIAL_DATA"]:
                 st.sidebar.error(
-                    "Missing columns: " + ", ".join(details)
-                )
-
-            elif status == "INVALID":
-                st.sidebar.error(
-                    "Some financial columns contain invalid values."
+                    "The CSV does not contain usable financial data."
                 )
 
             else:
                 st.session_state.analysis_df = analyzed
                 st.session_state.source_name = uploaded_file.name
                 st.session_state.uploaded_name = uploaded_file.name
+
                 st.sidebar.success(
                     f"{len(analyzed)} records analyzed."
                 )
+
+                st.sidebar.caption(
+                    f"Data completeness: {details['completeness']}%"
+                )
+
+                if details["confidence"] == "Low":
+                    st.sidebar.warning(
+                        "Low data coverage: some model inputs were estimated."
+                    )
+                elif details["confidence"] == "Medium":
+                    st.sidebar.info(
+                        "Medium data coverage: some model inputs were estimated."
+                    )
+                else:
+                    st.sidebar.success(
+                        "High data coverage."
+                    )
 
         except Exception as e:
             st.sidebar.error(f"Could not process CSV: {e}")
@@ -510,6 +722,21 @@ st.caption(
     f"Current dataset: **{st.session_state.source_name}**"
 )
 
+# Show data coverage transparently.
+if "data_completeness" in st.session_state.analysis_df.columns:
+    completeness = float(
+        st.session_state.analysis_df["data_completeness"].iloc[0]
+    )
+    confidence = st.session_state.analysis_df[
+        "prediction_confidence"
+    ].iloc[0]
+
+    if completeness < 100:
+        st.warning(
+            f"Data coverage: {completeness:.0f}% • "
+            f"Prediction confidence: {confidence}. "
+            "Missing fields are estimated for this prototype."
+        )
 
 df = st.session_state.analysis_df
 
@@ -664,6 +891,25 @@ if page == "Dashboard":
     st.caption(
         "Prototype note: risk predictions are based on the current synthetic training dataset."
     )
+
+    if "data_completeness" in df.columns:
+        with st.expander("ℹ️ Data Coverage & Model Confidence"):
+            completeness = float(df["data_completeness"].iloc[0])
+            confidence = df["prediction_confidence"].iloc[0]
+
+            st.write(
+                f"**Data completeness:** {completeness:.0f}%"
+            )
+            st.write(
+                f"**Prediction confidence:** {confidence}"
+            )
+            st.write(
+                "CreditLens can analyze partial datasets. "
+                "When a model input is not provided, the current prototype "
+                "uses a neutral fallback estimate and clearly marks the result. "
+                "For production decisions, missing values should instead be "
+                "handled using a validated imputation strategy."
+            )
 
 
 # ============================================================

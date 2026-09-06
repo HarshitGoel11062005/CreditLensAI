@@ -3,9 +3,21 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.ensemble import IsolationForest
+from io import BytesIO
+
+# Optional PDF report dependency.
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 
 # ============================================================
-# PAGE CONFIGURATION
+# CREDITLENS AI — ALL-IN-ONE PRODUCT APP
 # ============================================================
 
 st.set_page_config(
@@ -21,103 +33,52 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .main {
-        background: #f7f9fc;
-    }
-
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
+    .main { background: #f7f9fc; }
+    .block-container { padding-top: 1.8rem; padding-bottom: 2rem; }
 
     .hero {
-        padding: 1.4rem 1.6rem;
+        padding: 1.5rem 1.7rem;
         border-radius: 18px;
         background: linear-gradient(135deg, #0f172a, #1e3a5f);
         color: white;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 8px 25px rgba(15, 23, 42, 0.12);
+        margin-bottom: 1.4rem;
+        box-shadow: 0 8px 25px rgba(15,23,42,.12);
     }
 
-    .hero h1 {
-        margin: 0;
-        font-size: 2.2rem;
-    }
-
-    .hero p {
-        margin: 0.5rem 0 0 0;
-        opacity: 0.88;
-        font-size: 1rem;
-    }
+    .hero h1 { margin: 0; font-size: 2.25rem; }
+    .hero p { margin: .45rem 0 0; opacity: .88; }
 
     .section-title {
         font-size: 1.35rem;
-        font-weight: 700;
-        margin-top: 1rem;
-        margin-bottom: 0.8rem;
+        font-weight: 750;
+        margin: .8rem 0;
     }
 
     .metric-card {
         background: white;
-        border-radius: 15px;
-        padding: 1.1rem 1.2rem;
-        border: 1px solid #e5e7eb;
-        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
-        min-height: 115px;
-    }
-
-    .metric-label {
-        color: #64748b;
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-
-    .metric-value {
-        color: #0f172a;
-        font-size: 1.8rem;
-        font-weight: 750;
-        margin-top: 0.25rem;
-    }
-
-    .metric-sub {
-        color: #64748b;
-        font-size: 0.78rem;
-        margin-top: 0.2rem;
-    }
-
-    .risk-low {
-        color: #15803d;
-        font-weight: 700;
-    }
-
-    .risk-medium {
-        color: #b45309;
-        font-weight: 700;
-    }
-
-    .risk-high {
-        color: #b91c1c;
-        font-weight: 700;
-    }
-
-    .insight-box {
-        background: white;
         border: 1px solid #e5e7eb;
         border-radius: 15px;
-        padding: 1rem 1.1rem;
-        margin-bottom: 0.7rem;
+        padding: 1rem 1.15rem;
+        min-height: 110px;
+        box-shadow: 0 4px 14px rgba(15,23,42,.05);
     }
 
-    .small-note {
-        color: #64748b;
-        font-size: 0.78rem;
+    .metric-label { color:#64748b; font-size:.83rem; font-weight:650; }
+    .metric-value { color:#0f172a; font-size:1.75rem; font-weight:800; margin-top:.25rem; }
+    .metric-sub { color:#64748b; font-size:.76rem; }
+
+    .insight {
+        background:white;
+        border:1px solid #e5e7eb;
+        border-radius:14px;
+        padding:1rem;
+        margin-bottom:.65rem;
     }
 
-    [data-testid="stSidebar"] {
-        border-right: 1px solid #e5e7eb;
-    }
+    .small-note { color:#64748b; font-size:.78rem; }
 </style>
 """, unsafe_allow_html=True)
+
 
 # ============================================================
 # MODEL
@@ -129,8 +90,9 @@ def load_model():
 
 model = load_model()
 
+
 # ============================================================
-# FEATURES — EXACT MODEL INPUT STRUCTURE
+# MODEL FEATURES
 # ============================================================
 
 BASE_FEATURES = [
@@ -148,19 +110,7 @@ BASE_FEATURES = [
     "credit_utilization"
 ]
 
-MODEL_FEATURES = [
-    "monthly_revenue",
-    "monthly_expenses",
-    "total_debt",
-    "monthly_emi",
-    "average_balance",
-    "late_payment_count",
-    "total_transactions",
-    "avg_transaction_value",
-    "revenue_growth",
-    "expense_growth",
-    "cashflow_volatility",
-    "credit_utilization",
+MODEL_FEATURES = BASE_FEATURES + [
     "debt_to_income",
     "expense_ratio",
     "cashflow",
@@ -168,6 +118,83 @@ MODEL_FEATURES = [
     "transaction_consistency",
     "cash_reserve_ratio"
 ]
+
+
+# ============================================================
+# SMART COLUMN NORMALIZATION
+# ============================================================
+
+ALIASES = {
+    "revenue": "monthly_revenue",
+    "monthly sales": "monthly_revenue",
+    "sales": "monthly_revenue",
+    "income": "monthly_revenue",
+    "monthly income": "monthly_revenue",
+    "turnover": "monthly_revenue",
+
+    "expenses": "monthly_expenses",
+    "monthly expense": "monthly_expenses",
+    "costs": "monthly_expenses",
+    "monthly costs": "monthly_expenses",
+
+    "debt": "total_debt",
+    "loan": "total_debt",
+    "total loan": "total_debt",
+    "outstanding debt": "total_debt",
+    "outstanding loan": "total_debt",
+
+    "emi": "monthly_emi",
+    "monthly loan payment": "monthly_emi",
+    "loan payment": "monthly_emi",
+    "monthly emi": "monthly_emi",
+
+    "balance": "average_balance",
+    "bank balance": "average_balance",
+    "average bank balance": "average_balance",
+    "avg balance": "average_balance",
+
+    "late payments": "late_payment_count",
+    "late payment count": "late_payment_count",
+    "delayed payments": "late_payment_count",
+    "missed payments": "late_payment_count",
+
+    "transactions": "total_transactions",
+    "transaction count": "total_transactions",
+    "number of transactions": "total_transactions",
+
+    "average transaction": "avg_transaction_value",
+    "avg transaction": "avg_transaction_value",
+    "average transaction value": "avg_transaction_value",
+
+    "revenue growth": "revenue_growth",
+    "sales growth": "revenue_growth",
+    "growth": "revenue_growth",
+
+    "expense growth": "expense_growth",
+
+    "cash flow volatility": "cashflow_volatility",
+    "cashflow volatility": "cashflow_volatility",
+    "cash volatility": "cashflow_volatility",
+
+    "credit utilization": "credit_utilization",
+    "credit utilisation": "credit_utilization",
+    "utilization": "credit_utilization",
+    "utilisation": "credit_utilization"
+}
+
+
+def normalize_columns(df):
+    df = df.copy()
+    rename_map = {}
+
+    for col in df.columns:
+        cleaned = str(col).strip().lower().replace("_", " ")
+        if cleaned in ALIASES:
+            rename_map[col] = ALIASES[cleaned]
+
+    df.rename(columns=rename_map, inplace=True)
+    return df
+
 
 # ============================================================
 # FEATURE ENGINEERING
@@ -187,7 +214,8 @@ def engineer_features(df):
     )
 
     df["cashflow"] = (
-        df["monthly_revenue"] - df["monthly_expenses"]
+        df["monthly_revenue"] -
+        df["monthly_expenses"]
     )
 
     df["repayment_score"] = (
@@ -208,6 +236,7 @@ def engineer_features(df):
     df.fillna(0, inplace=True)
 
     return df
+
 
 # ============================================================
 # CREDIT INTELLIGENCE SCORE
@@ -254,13 +283,13 @@ def calculate_credit_score(row):
 def risk_category(score):
     if score >= 75:
         return "Low Risk"
-    elif score >= 50:
+    if score >= 50:
         return "Medium Risk"
     return "High Risk"
 
 
 # ============================================================
-# FINANCIAL HEALTH SCORE
+# FINANCIAL HEALTH
 # ============================================================
 
 def calculate_financial_health(row):
@@ -273,10 +302,7 @@ def calculate_financial_health(row):
     else:
         score += 5
 
-    if row["cashflow"] > 0:
-        score += 20
-    else:
-        score += 5
+    score += 20 if row["cashflow"] > 0 else 5
 
     if row["debt_to_income"] < 0.30:
         score += 20
@@ -292,10 +318,8 @@ def calculate_financial_health(row):
     else:
         score += 5
 
-    if row["transaction_consistency"] > 1:
-        score += 20
-    else:
-        score += 10
+    # Kept consistent with the current Colab prototype.
+    score += 20 if row["transaction_consistency"] > 1 else 10
 
     return min(100, score)
 
@@ -323,190 +347,96 @@ def demo_data():
 
 
 # ============================================================
-# ANALYSIS PIPELINE
+# FLEXIBLE ANALYSIS ENGINE
 # ============================================================
 
-def normalize_columns(df):
-    """
-    Accept common alternative names so users do not need to prepare
-    the exact CreditLens column names.
-    """
-    df = df.copy()
-
-    aliases = {
-        "revenue": "monthly_revenue",
-        "monthly sales": "monthly_revenue",
-        "sales": "monthly_revenue",
-        "income": "monthly_revenue",
-        "monthly income": "monthly_revenue",
-
-        "expenses": "monthly_expenses",
-        "monthly expense": "monthly_expenses",
-        "costs": "monthly_expenses",
-        "monthly costs": "monthly_expenses",
-
-        "debt": "total_debt",
-        "loan": "total_debt",
-        "total loan": "total_debt",
-        "outstanding debt": "total_debt",
-
-        "emi": "monthly_emi",
-        "monthly loan payment": "monthly_emi",
-        "loan payment": "monthly_emi",
-
-        "balance": "average_balance",
-        "bank balance": "average_balance",
-        "average bank balance": "average_balance",
-
-        "late payments": "late_payment_count",
-        "late payment count": "late_payment_count",
-        "delayed payments": "late_payment_count",
-
-        "transactions": "total_transactions",
-        "transaction count": "total_transactions",
-
-        "average transaction": "avg_transaction_value",
-        "avg transaction": "avg_transaction_value",
-        "average transaction value": "avg_transaction_value",
-
-        "revenue growth": "revenue_growth",
-        "sales growth": "revenue_growth",
-
-        "expense growth": "expense_growth",
-
-        "cash flow volatility": "cashflow_volatility",
-        "cashflow volatility": "cashflow_volatility",
-
-        "credit utilization": "credit_utilization",
-        "credit utilisation": "credit_utilization",
-        "utilization": "credit_utilization",
-        "utilisation": "credit_utilization"
-    }
-
-    rename_map = {}
-
-    for col in df.columns:
-        clean = str(col).strip().lower().replace("_", " ")
-        if clean in aliases:
-            rename_map[col] = aliases[clean]
-
-    df.rename(columns=rename_map, inplace=True)
-
-    return df
+DEFAULTS = {
+    "monthly_revenue": 500000,
+    "monthly_expenses": 350000,
+    "total_debt": 800000,
+    "monthly_emi": 60000,
+    "average_balance": 300000,
+    "late_payment_count": 0,
+    "total_transactions": 80,
+    "avg_transaction_value": 7500,
+    "revenue_growth": 0.05,
+    "expense_growth": 0.05,
+    "cashflow_volatility": 0.30,
+    "credit_utilization": 0.50
+}
 
 
 def analyze_data(input_df):
-    """
-    Flexible analysis:
-    - accepts a complete dataset
-    - accepts a partial dataset
-    - accepts common alternative column names
-    - creates engineered fields internally
-    - fills unavailable model inputs with transparent estimates
-    - reports data completeness so users know prediction confidence
-    """
-
     df = normalize_columns(input_df)
 
-    # A completely empty dataset cannot be analyzed.
     if df.empty:
         return None, "EMPTY", None
 
-    # Numeric conversion for columns that are supplied.
-    supplied_base = [
-        c for c in BASE_FEATURES
-        if c in df.columns
-    ]
+    # If a useful business ID exists under a common name, preserve it.
+    if "business_id" not in df.columns:
+        for possible in ["business", "business name", "company", "company name", "id"]:
+            if possible in df.columns:
+                df["business_id"] = df[possible].astype(str)
+                break
 
-    for col in supplied_base:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Convert supplied model fields.
+    supplied = []
+    estimated = []
 
-    # Remove rows where all supplied financial values are missing.
-    if supplied_base:
-        df = df.dropna(
-            how="all",
-            subset=supplied_base
-        ).reset_index(drop=True)
+    for col in BASE_FEATURES:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            supplied.append(col)
+
+    # Handle a simple profit field if available.
+    profit_candidates = ["monthly_profit", "profit", "net profit"]
+    if "monthly_expenses" not in df.columns:
+        for p in profit_candidates:
+            if p in df.columns and "monthly_revenue" in df.columns:
+                profit = pd.to_numeric(df[p], errors="coerce")
+                df["monthly_expenses"] = (
+                    df["monthly_revenue"] - profit
+                )
+                supplied.append("monthly_expenses")
+                break
+
+    if not supplied:
+        return None, "NO_FINANCIAL_DATA", None
+
+    # Rows with no supplied financial information are removed.
+    df = df.dropna(
+        how="all",
+        subset=[c for c in BASE_FEATURES if c in df.columns]
+    ).reset_index(drop=True)
 
     if df.empty:
         return None, "NO_FINANCIAL_DATA", None
 
-    # --------------------------------------------------------
-    # Flexible defaults
-    #
-    # These are prototype fallback values, not real borrower
-    # facts. They allow partial datasets to be scored while
-    # keeping a data-completeness indicator.
-    # --------------------------------------------------------
-
-    defaults = {
-        "monthly_revenue": 500000,
-        "monthly_expenses": 350000,
-        "total_debt": 800000,
-        "monthly_emi": 60000,
-        "average_balance": 300000,
-        "late_payment_count": 0,
-        "total_transactions": 80,
-        "avg_transaction_value": 7500,
-        "revenue_growth": 0.05,
-        "expense_growth": 0.05,
-        "cashflow_volatility": 0.30,
-        "credit_utilization": 0.50
-    }
-
-    # Track what the user actually supplied.
-    original_supplied = set(
-        c for c in BASE_FEATURES
-        if c in df.columns
-    )
-
-    estimated_columns = []
-
+    # Fill missing fields with transparent prototype defaults.
     for col in BASE_FEATURES:
         if col not in df.columns:
-            df[col] = defaults[col]
-            estimated_columns.append(col)
+            df[col] = DEFAULTS[col]
+            estimated.append(col)
         else:
-            missing_values = df[col].isna()
-
-            if missing_values.any():
-                df.loc[missing_values, col] = defaults[col]
-
-                if col not in estimated_columns:
-                    estimated_columns.append(col)
-
-    # --------------------------------------------------------
-    # Keep user/business identifier when available.
-    # --------------------------------------------------------
+            missing = df[col].isna()
+            if missing.any():
+                df.loc[missing, col] = DEFAULTS[col]
+                estimated.append(col)
 
     if "business_id" not in df.columns:
-        if "id" in df.columns:
-            df["business_id"] = df["id"].astype(str)
-        else:
-            df["business_id"] = [
-                f"SME-{i + 1:04d}"
-                for i in range(len(df))
-            ]
-
-    # --------------------------------------------------------
-    # Create the exact engineered features expected by the model.
-    # --------------------------------------------------------
+        df["business_id"] = [
+            f"SME-{i + 1:04d}"
+            for i in range(len(df))
+        ]
 
     df = engineer_features(df)
 
-    # --------------------------------------------------------
-    # ML prediction
-    # --------------------------------------------------------
-
+    # Actual trained Random Forest.
     X = df[MODEL_FEATURES]
-
     df["ml_prediction"] = model.predict(X)
     df["ml_probability"] = model.predict_proba(X)[:, 1]
 
-    # --------------------------------------------------------
-    # CreditLens scores
-    # --------------------------------------------------------
-
+    # CreditLens business scores.
     df["credit_score"] = df.apply(
         calculate_credit_score,
         axis=1
@@ -521,19 +451,15 @@ def analyze_data(input_df):
         axis=1
     )
 
-    # --------------------------------------------------------
-    # Data completeness / confidence indicator
-    # --------------------------------------------------------
-
-    supplied_count = len(original_supplied)
-    total_base = len(BASE_FEATURES)
-
-    completeness = round(
-        (supplied_count / total_base) * 100,
-        1
+    # Data coverage.
+    supplied_unique = set(
+        c for c in supplied if c in BASE_FEATURES
     )
 
-    df["data_completeness"] = completeness
+    completeness = round(
+        100 * len(supplied_unique) / len(BASE_FEATURES),
+        1
+    )
 
     if completeness >= 90:
         confidence = "High"
@@ -542,14 +468,11 @@ def analyze_data(input_df):
     else:
         confidence = "Low"
 
+    df["data_completeness"] = completeness
     df["prediction_confidence"] = confidence
 
-    # --------------------------------------------------------
-    # Batch anomaly detection
-    # --------------------------------------------------------
-
+    # Batch anomaly detection.
     if len(df) >= 5:
-
         anomaly_features = [
             "monthly_revenue",
             "monthly_expenses",
@@ -571,44 +494,124 @@ def analyze_data(input_df):
             df[anomaly_features]
         )
 
-        df["anomaly_status"] = df[
-            "anomaly_prediction"
-        ].map({
+        df["anomaly_status"] = df["anomaly_prediction"].map({
             1: "Normal",
             -1: "Anomaly"
         })
-
     else:
         df["anomaly_status"] = "Need 5+ records"
 
-    return df, "OK", {
-        "supplied_columns": sorted(original_supplied),
-        "estimated_columns": estimated_columns,
+    info = {
+        "supplied_columns": sorted(supplied_unique),
+        "estimated_columns": sorted(set(estimated)),
         "completeness": completeness,
         "confidence": confidence
     }
 
+    return df, "OK", info
+
 
 # ============================================================
-# HELPER FUNCTIONS
+# REPORT GENERATION
 # ============================================================
 
-def money(value):
-    return f"₹{value:,.0f}"
+def create_pdf_report(row):
+    if not REPORTLAB_AVAILABLE:
+        return None
 
+    buffer = BytesIO()
 
-def score_progress(label, value):
-    st.markdown(f"**{label}**")
-    st.progress(int(max(0, min(100, value))))
-    st.caption(f"{int(value)}/100")
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=35,
+        leftMargin=35,
+        topMargin=35,
+        bottomMargin=35
+    )
 
+    styles = getSampleStyleSheet()
+    story = []
 
-def risk_class(risk):
-    if risk == "Low Risk":
-        return "risk-low"
-    elif risk == "Medium Risk":
-        return "risk-medium"
-    return "risk-high"
+    business = str(row.get("business_id", "Selected Business"))
+
+    story.append(
+        Paragraph(
+            "CreditLens AI — SME Risk Intelligence Report",
+            styles["Title"]
+        )
+    )
+
+    story.append(
+        Paragraph(
+            f"Business: {business}",
+            styles["Heading2"]
+        )
+    )
+
+    story.append(Spacer(1, 12))
+
+    summary = [
+        ["Metric", "Result"],
+        ["Credit Intelligence Score", f"{int(row['credit_score'])}/100"],
+        ["Risk Category", str(row["risk_category"])],
+        ["Financial Health", f"{int(row['financial_health_score'])}/100"],
+        ["ML High-Risk Probability", f"{row['ml_probability']*100:.1f}%"],
+        ["Data Completeness", f"{row['data_completeness']:.0f}%"],
+        ["Prediction Confidence", str(row["prediction_confidence"])]
+    ]
+
+    table = Table(summary, colWidths=[230, 180])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("PADDING", (0, 0), (-1, -1), 7)
+    ]))
+
+    story.append(table)
+    story.append(Spacer(1, 18))
+
+    story.append(
+        Paragraph("Key Financial Indicators", styles["Heading2"])
+    )
+
+    indicators = [
+        ["Indicator", "Value"],
+        ["Monthly Revenue", f"₹{row['monthly_revenue']:,.0f}"],
+        ["Monthly Expenses", f"₹{row['monthly_expenses']:,.0f}"],
+        ["Total Debt", f"₹{row['total_debt']:,.0f}"],
+        ["Monthly EMI", f"₹{row['monthly_emi']:,.0f}"],
+        ["Debt-to-Income", f"{row['debt_to_income']:.2f}"],
+        ["Expense Ratio", f"{row['expense_ratio']:.2f}"],
+        ["Late Payments", str(int(row["late_payment_count"]))],
+        ["Credit Utilization", f"{row['credit_utilization']*100:.1f}%"]
+    ]
+
+    table2 = Table(indicators, colWidths=[230, 180])
+    table2.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#334155")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("PADDING", (0, 0), (-1, -1), 6)
+    ]))
+
+    story.append(table2)
+    story.append(Spacer(1, 18))
+
+    story.append(
+        Paragraph(
+            "Prototype disclaimer: the current ML model was trained on synthetic "
+            "SME data. This report is for project/prototype analysis and should "
+            "not be used as an automated lending decision.",
+            styles["BodyText"]
+        )
+    )
+
+    doc.build(story)
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 # ============================================================
@@ -621,6 +624,9 @@ if "analysis_df" not in st.session_state:
 
 if "source_name" not in st.session_state:
     st.session_state.source_name = "Demo SME dataset"
+
+if "uploaded_name" not in st.session_state:
+    st.session_state.uploaded_name = None
 
 
 # ============================================================
@@ -635,80 +641,84 @@ page = st.sidebar.radio(
     [
         "Dashboard",
         "Risk Analysis",
+        "Data Intelligence",
         "Anomaly Detection",
+        "Credit Simulator",
+        "Risk Report",
         "AI Copilot"
     ]
 )
 
 st.sidebar.divider()
 
-st.sidebar.markdown("### 📁 Business Data")
+st.sidebar.markdown("### 📁 Upload Financial Data")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload SME CSV",
-    type=["csv"],
-    help="CSV must contain the 12 base financial features."
+    "CSV or Excel file",
+    type=["csv", "xlsx"],
+    help="CreditLens can work with partial financial datasets."
 )
 
 if uploaded_file is not None:
-
-    if st.session_state.get("uploaded_name") != uploaded_file.name:
+    if st.session_state.uploaded_name != uploaded_file.name:
 
         try:
-            input_df = pd.read_csv(uploaded_file)
-            analyzed, status, details = analyze_data(input_df)
+            if uploaded_file.name.lower().endswith(".xlsx"):
+                input_df = pd.read_excel(uploaded_file)
+            else:
+                input_df = pd.read_csv(uploaded_file)
 
-            if status in ["EMPTY", "NO_FINANCIAL_DATA"]:
+            analyzed, status, info = analyze_data(input_df)
+
+            if status != "OK":
                 st.sidebar.error(
-                    "The CSV does not contain usable financial data."
+                    "No usable financial information was found."
                 )
-
             else:
                 st.session_state.analysis_df = analyzed
                 st.session_state.source_name = uploaded_file.name
                 st.session_state.uploaded_name = uploaded_file.name
 
                 st.sidebar.success(
-                    f"{len(analyzed)} records analyzed."
+                    f"{len(analyzed)} record(s) analyzed."
                 )
 
                 st.sidebar.caption(
-                    f"Data completeness: {details['completeness']}%"
+                    f"Data coverage: {info['completeness']:.0f}%"
                 )
 
-                if details["confidence"] == "Low":
+                if info["confidence"] == "Low":
                     st.sidebar.warning(
-                        "Low data coverage: some model inputs were estimated."
+                        "Low coverage: some model inputs are estimated."
                     )
-                elif details["confidence"] == "Medium":
+                elif info["confidence"] == "Medium":
                     st.sidebar.info(
-                        "Medium data coverage: some model inputs were estimated."
+                        "Medium coverage: some model inputs are estimated."
                     )
                 else:
-                    st.sidebar.success(
-                        "High data coverage."
-                    )
+                    st.sidebar.success("High data coverage.")
 
         except Exception as e:
-            st.sidebar.error(f"Could not process CSV: {e}")
+            st.sidebar.error(f"Could not process file: {e}")
 
-demo_csv = demo_data().to_csv(index=False)
+# Sample download.
+sample_csv = demo_data().to_csv(index=False)
 
 st.sidebar.download_button(
     "⬇️ Download Sample CSV",
-    data=demo_csv,
+    data=sample_csv,
     file_name="creditlens_sample_sme_data.csv",
     mime="text/csv"
 )
 
 st.sidebar.divider()
 st.sidebar.caption(
-    "Prototype model trained on synthetic SME data."
+    "Prototype ML model trained on synthetic data."
 )
 
 
 # ============================================================
-# HEADER
+# GLOBAL HEADER
 # ============================================================
 
 st.markdown("""
@@ -721,22 +731,6 @@ st.markdown("""
 st.caption(
     f"Current dataset: **{st.session_state.source_name}**"
 )
-
-# Show data coverage transparently.
-if "data_completeness" in st.session_state.analysis_df.columns:
-    completeness = float(
-        st.session_state.analysis_df["data_completeness"].iloc[0]
-    )
-    confidence = st.session_state.analysis_df[
-        "prediction_confidence"
-    ].iloc[0]
-
-    if completeness < 100:
-        st.warning(
-            f"Data coverage: {completeness:.0f}% • "
-            f"Prediction confidence: {confidence}. "
-            "Missing fields are estimated for this prototype."
-        )
 
 df = st.session_state.analysis_df
 
@@ -757,18 +751,16 @@ if page == "Dashboard":
     high_risk = int((df["risk_category"] == "High Risk").sum())
     anomaly_count = int((df["anomaly_status"] == "Anomaly").sum())
 
-    c1, c2, c3, c4 = st.columns(4)
+    cols = st.columns(4)
 
-    cards = [
+    card_data = [
         ("Average Credit Score", f"{avg_credit}/100", "Credit intelligence"),
-        ("Financial Health", f"{avg_health}/100", "Business health"),
-        ("High-Risk Businesses", str(high_risk), "Requires attention"),
+        ("Financial Health", f"{avg_health}/100", "Portfolio health"),
+        ("High-Risk Businesses", str(high_risk), "Needs attention"),
         ("Anomalies Detected", str(anomaly_count), "Unusual patterns")
     ]
 
-    for col, (label, value, sub) in zip(
-        [c1, c2, c3, c4], cards
-    ):
+    for col, (label, value, sub) in zip(cols, card_data):
         with col:
             st.markdown(
                 f"""
@@ -783,30 +775,30 @@ if page == "Dashboard":
 
     st.divider()
 
-    # Overall scores
     left, right = st.columns(2)
 
     with left:
-        st.markdown("### 🎯 Portfolio Credit Score")
-        score_progress("Average Credit Intelligence", avg_credit)
+        st.markdown("### 🎯 Credit Score")
+        st.progress(avg_credit)
+        st.caption(f"{avg_credit}/100")
 
     with right:
-        st.markdown("### ❤️ Portfolio Financial Health")
-        score_progress("Average Financial Health", avg_health)
+        st.markdown("### ❤️ Financial Health")
+        st.progress(avg_health)
+        st.caption(f"{avg_health}/100")
 
     st.divider()
 
-    # Financial overview
-    st.markdown("### 💰 Financial Overview")
+    st.markdown("### 💰 Portfolio Financial Overview")
 
-    financial_data = pd.DataFrame({
+    overview = pd.DataFrame({
         "Metric": [
             "Monthly Revenue",
             "Monthly Expenses",
             "Total Debt",
             "Average Balance"
         ],
-        "Average Amount": [
+        "Average": [
             df["monthly_revenue"].mean(),
             df["monthly_expenses"].mean(),
             df["total_debt"].mean(),
@@ -814,26 +806,19 @@ if page == "Dashboard":
         ]
     })
 
-    chart_col, summary_col = st.columns([2, 1])
+    chart, snapshot = st.columns([2, 1])
 
-    with chart_col:
-        st.bar_chart(
-            financial_data.set_index("Metric")
-        )
+    with chart:
+        st.bar_chart(overview.set_index("Metric"))
 
-    with summary_col:
-        avg_revenue = df["monthly_revenue"].mean()
-        avg_expenses = df["monthly_expenses"].mean()
-        avg_cashflow = df["cashflow"].mean()
-
+    with snapshot:
         st.markdown("#### Portfolio Snapshot")
-        st.metric("Avg Revenue", money(avg_revenue))
-        st.metric("Avg Expenses", money(avg_expenses))
-        st.metric("Avg Cashflow", money(avg_cashflow))
+        st.metric("Avg Revenue", f"₹{df['monthly_revenue'].mean():,.0f}")
+        st.metric("Avg Expenses", f"₹{df['monthly_expenses'].mean():,.0f}")
+        st.metric("Avg Cashflow", f"₹{df['cashflow'].mean():,.0f}")
 
     st.divider()
 
-    # Risk distribution
     st.markdown("### 🎯 Risk Distribution")
 
     risk_counts = (
@@ -845,70 +830,49 @@ if page == "Dashboard":
         )
     )
 
-    rc1, rc2 = st.columns([1, 2])
+    r1, r2 = st.columns([1, 2])
 
-    with rc1:
+    with r1:
         st.dataframe(
             risk_counts.rename("Businesses"),
             use_container_width=True
         )
 
-    with rc2:
+    with r2:
         st.bar_chart(risk_counts)
 
     st.divider()
 
-    # Attention required
     st.markdown("### 🚨 Businesses Requiring Attention")
 
     attention = df[
         (df["risk_category"] == "High Risk") |
         (df["anomaly_status"] == "Anomaly")
-    ].copy()
-
-    attention_cols = [
-        c for c in [
-            "business_id",
-            "credit_score",
-            "financial_health_score",
-            "risk_category",
-            "ml_probability",
-            "anomaly_status"
-        ]
-        if c in attention.columns
     ]
 
-    if len(attention) > 0:
-        st.dataframe(
-            attention[attention_cols],
-            use_container_width=True
-        )
-    else:
-        st.success(
-            "No high-risk or anomalous businesses require immediate attention."
-        )
+    attention_cols = [
+        "business_id",
+        "credit_score",
+        "financial_health_score",
+        "risk_category",
+        "ml_probability",
+        "anomaly_status"
+    ]
 
-    st.caption(
-        "Prototype note: risk predictions are based on the current synthetic training dataset."
+    st.dataframe(
+        attention[[c for c in attention_cols if c in attention.columns]],
+        use_container_width=True
     )
 
     if "data_completeness" in df.columns:
-        with st.expander("ℹ️ Data Coverage & Model Confidence"):
-            completeness = float(df["data_completeness"].iloc[0])
-            confidence = df["prediction_confidence"].iloc[0]
+        coverage = float(df["data_completeness"].iloc[0])
+        confidence = df["prediction_confidence"].iloc[0]
 
-            st.write(
-                f"**Data completeness:** {completeness:.0f}%"
-            )
-            st.write(
-                f"**Prediction confidence:** {confidence}"
-            )
-            st.write(
-                "CreditLens can analyze partial datasets. "
-                "When a model input is not provided, the current prototype "
-                "uses a neutral fallback estimate and clearly marks the result. "
-                "For production decisions, missing values should instead be "
-                "handled using a validated imputation strategy."
+        if coverage < 100:
+            st.warning(
+                f"Data coverage: {coverage:.0f}% • "
+                f"Prediction confidence: {confidence}. "
+                "Missing inputs are estimated in this prototype."
             )
 
 
@@ -919,29 +883,22 @@ if page == "Dashboard":
 elif page == "Risk Analysis":
 
     st.markdown(
-        '<div class="section-title">🔍 Business-Level Credit Risk Analysis</div>',
+        '<div class="section-title">🔍 Business-Level Risk Analysis</div>',
         unsafe_allow_html=True
     )
 
-    if "business_id" in df.columns:
-        options = df["business_id"].astype(str).tolist()
+    selected = st.selectbox(
+        "Select Business",
+        df["business_id"].astype(str).tolist()
+    )
 
-        selected = st.selectbox(
-            "Select Business",
-            options
-        )
+    row = df[
+        df["business_id"].astype(str) == selected
+    ].iloc[0]
 
-        row = df[
-            df["business_id"].astype(str) == selected
-        ].iloc[0]
-    else:
-        selected_index = st.selectbox(
-            "Select Business Record",
-            range(len(df))
-        )
-        row = df.iloc[selected_index]
-
-    st.markdown(f"### 🏢 Business Profile: {row.get('business_id', 'Selected Record')}")
+    st.markdown(
+        f"### 🏢 {row['business_id']}"
+    )
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -956,68 +913,33 @@ elif page == "Risk Analysis":
     )
 
     c3.metric(
-        "Risk Category",
+        "Risk",
         row["risk_category"]
     )
 
     c4.metric(
-        "High-Risk Probability",
-        f"{row['ml_probability'] * 100:.1f}%"
+        "ML High-Risk Probability",
+        f"{row['ml_probability']*100:.1f}%"
     )
 
     st.divider()
-
-    # Score bars
-    p1, p2 = st.columns(2)
-
-    with p1:
-        score_progress(
-            "Credit Intelligence Score",
-            row["credit_score"]
-        )
-
-    with p2:
-        score_progress(
-            "Financial Health Score",
-            row["financial_health_score"]
-        )
-
-    st.divider()
-
-    st.markdown("### 📌 Key Financial Indicators")
 
     k1, k2, k3, k4 = st.columns(4)
 
-    k1.metric(
-        "Debt-to-Income",
-        f"{row['debt_to_income']:.2f}"
-    )
-
-    k2.metric(
-        "Expense Ratio",
-        f"{row['expense_ratio']:.2f}"
-    )
-
-    k3.metric(
-        "Repayment Score",
-        f"{row['repayment_score'] * 100:.0f}/100"
-    )
-
-    k4.metric(
-        "Credit Utilization",
-        f"{row['credit_utilization'] * 100:.1f}%"
-    )
+    k1.metric("Debt-to-Income", f"{row['debt_to_income']:.2f}")
+    k2.metric("Expense Ratio", f"{row['expense_ratio']:.2f}")
+    k3.metric("Repayment Score", f"{row['repayment_score']*100:.0f}/100")
+    k4.metric("Credit Utilization", f"{row['credit_utilization']*100:.1f}%")
 
     st.divider()
 
-    # Automated explanation
     positive = []
     risks = []
 
     if row["revenue_growth"] >= 0.05:
         positive.append("Positive revenue growth")
     else:
-        risks.append("Revenue growth is weak or negative")
+        risks.append("Weak or negative revenue growth")
 
     if row["cashflow"] > 0:
         positive.append("Positive operating cash-flow")
@@ -1025,9 +947,9 @@ elif page == "Risk Analysis":
         risks.append("Negative operating cash-flow")
 
     if row["debt_to_income"] < 0.30:
-        positive.append("Healthy debt-to-income level")
+        positive.append("Healthy debt-to-income")
     elif row["debt_to_income"] >= 0.50:
-        risks.append("High debt-to-income ratio")
+        risks.append("High debt-to-income")
 
     if row["late_payment_count"] == 0:
         positive.append("No late payments")
@@ -1039,36 +961,122 @@ elif page == "Risk Analysis":
     elif row["credit_utilization"] < 0.60:
         positive.append("Controlled credit utilization")
 
-    ex1, ex2 = st.columns(2)
+    e1, e2 = st.columns(2)
 
-    with ex1:
+    with e1:
         st.markdown("### ✅ Positive Factors")
-        if positive:
-            for item in positive:
-                st.success(item)
-        else:
-            st.info("No strong positive indicators identified.")
+        for item in positive:
+            st.success(item)
+        if not positive:
+            st.info("No strong positive indicators found.")
 
-    with ex2:
+    with e2:
         st.markdown("### ⚠️ Risk Factors")
-        if risks:
-            for item in risks:
-                st.warning(item)
-        else:
-            st.success("No major rule-based risk factors identified.")
+        for item in risks:
+            st.warning(item)
+        if not risks:
+            st.success("No major rule-based risk factors found.")
 
     st.divider()
 
-    st.markdown("### 💰 Business Financial Data")
+    st.markdown("### 💰 Financial Profile")
 
-    raw_cols = [
-        c for c in BASE_FEATURES
-        if c in row.index
-    ]
+    profile = pd.DataFrame({
+        "Metric": [
+            "Monthly Revenue",
+            "Monthly Expenses",
+            "Cashflow",
+            "Total Debt",
+            "Monthly EMI",
+            "Average Balance",
+            "Late Payments",
+            "Revenue Growth",
+            "Expense Growth"
+        ],
+        "Value": [
+            f"₹{row['monthly_revenue']:,.0f}",
+            f"₹{row['monthly_expenses']:,.0f}",
+            f"₹{row['cashflow']:,.0f}",
+            f"₹{row['total_debt']:,.0f}",
+            f"₹{row['monthly_emi']:,.0f}",
+            f"₹{row['average_balance']:,.0f}",
+            int(row["late_payment_count"]),
+            f"{row['revenue_growth']*100:.1f}%",
+            f"{row['expense_growth']*100:.1f}%"
+        ]
+    })
+
+    st.dataframe(profile, use_container_width=True)
+
+    st.caption(
+        f"Data coverage: {row['data_completeness']:.0f}% • "
+        f"Prediction confidence: {row['prediction_confidence']}"
+    )
+
+
+# ============================================================
+# DATA INTELLIGENCE
+# ============================================================
+
+elif page == "Data Intelligence":
+
+    st.markdown(
+        '<div class="section-title">🧠 Smart Data Intelligence</div>',
+        unsafe_allow_html=True
+    )
+
+    st.write(
+        "CreditLens accepts different column names and does not require "
+        "the engineered model columns to be supplied by the user."
+    )
+
+    coverage = float(df["data_completeness"].iloc[0])
+    confidence = df["prediction_confidence"].iloc[0]
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric("Data Coverage", f"{coverage:.0f}%")
+    c2.metric("Prediction Confidence", confidence)
+    c3.metric("Records", len(df))
+
+    st.divider()
+
+    supplied = []
+    estimated = []
+
+    for col in BASE_FEATURES:
+        if col in df.columns:
+            # A field is considered supplied when it was part of
+            # the original user dataset. This information is stored
+            # in session state when an upload is used.
+            supplied.append(col)
+
+    st.markdown("### 🔄 CreditLens Processing Pipeline")
+
+    st.write(
+        "User Data → Column Mapping → Missing-Input Handling → "
+        "Feature Engineering → Random Forest → Credit Score → "
+        "Financial Health → Anomaly Detection"
+    )
+
+    st.divider()
+
+    st.markdown("### 📋 Current Dataset")
 
     st.dataframe(
-        pd.DataFrame([row[raw_cols]]),
+        df.head(100),
         use_container_width=True
+    )
+
+    st.divider()
+
+    st.markdown("### ⚠️ Important Data Limitation")
+
+    st.warning(
+        "If important financial fields are missing, this prototype uses "
+        "neutral fallback estimates. This allows the application to work "
+        "with incomplete data, but those estimates must be replaced with "
+        "validated imputation or real extracted data before production use."
     )
 
 
@@ -1089,16 +1097,8 @@ elif page == "Anomaly Detection":
 
     c1, c2, c3 = st.columns(3)
 
-    c1.metric(
-        "Records Analyzed",
-        len(df)
-    )
-
-    c2.metric(
-        "Anomalies Detected",
-        anomaly_count
-    )
-
+    c1.metric("Records Analyzed", len(df))
+    c2.metric("Anomalies", anomaly_count)
     c3.metric(
         "Normal Records",
         int((df["anomaly_status"] == "Normal").sum())
@@ -1108,27 +1108,22 @@ elif page == "Anomaly Detection":
 
     if len(df) < 5:
         st.warning(
-            "Upload at least 5 business records for batch anomaly detection."
+            "Upload at least 5 businesses for batch anomaly detection."
         )
 
     anomaly_cols = [
-        c for c in [
-            "business_id",
-            "monthly_revenue",
-            "monthly_expenses",
-            "total_debt",
-            "average_balance",
-            "credit_score",
-            "risk_category",
-            "anomaly_status"
-        ]
-        if c in df.columns
+        "business_id",
+        "monthly_revenue",
+        "monthly_expenses",
+        "total_debt",
+        "average_balance",
+        "credit_score",
+        "risk_category",
+        "anomaly_status"
     ]
 
-    st.markdown("### 📋 Anomaly Monitoring Table")
-
     st.dataframe(
-        df[anomaly_cols],
+        df[[c for c in anomaly_cols if c in df.columns]],
         use_container_width=True
     )
 
@@ -1138,21 +1133,249 @@ elif page == "Anomaly Detection":
 
     if len(anomalies) > 0:
         st.error(
-            f"⚠️ {len(anomalies)} unusual financial record(s) detected."
+            f"{len(anomalies)} unusual financial record(s) detected."
         )
-
         st.dataframe(
-            anomalies[anomaly_cols],
+            anomalies[[c for c in anomaly_cols if c in anomalies.columns]],
             use_container_width=True
         )
     elif len(df) >= 5:
-        st.success(
-            "No unusual financial records detected in the current batch."
-        )
+        st.success("No unusual financial records detected.")
 
     st.info(
-        "Current prototype uses Isolation Forest on the uploaded batch. "
-        "For production, a separately trained anomaly model should be persisted."
+        "Current prototype trains Isolation Forest on the uploaded batch. "
+        "A production system should persist and validate a separately "
+        "trained anomaly model."
+    )
+
+
+# ============================================================
+# CREDIT SIMULATOR
+# ============================================================
+
+elif page == "Credit Simulator":
+
+    st.markdown(
+        '<div class="section-title">🧪 Credit Score Simulator</div>',
+        unsafe_allow_html=True
+    )
+
+    st.write(
+        "Test how changes in business finances could affect the "
+        "CreditLens score. This is a scenario tool, not a guaranteed future score."
+    )
+
+    selected = st.selectbox(
+        "Select Business",
+        df["business_id"].astype(str).tolist()
+    )
+
+    base_row = df[
+        df["business_id"].astype(str) == selected
+    ].iloc[0]
+
+    st.markdown("### Change Financial Conditions")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        sim_revenue = st.number_input(
+            "Monthly Revenue",
+            min_value=0.0,
+            value=float(base_row["monthly_revenue"]),
+            step=10000.0
+        )
+
+        sim_expenses = st.number_input(
+            "Monthly Expenses",
+            min_value=0.0,
+            value=float(base_row["monthly_expenses"]),
+            step=10000.0
+        )
+
+        sim_debt = st.number_input(
+            "Total Debt",
+            min_value=0.0,
+            value=float(base_row["total_debt"]),
+            step=10000.0
+        )
+
+        sim_emi = st.number_input(
+            "Monthly EMI",
+            min_value=0.0,
+            value=float(base_row["monthly_emi"]),
+            step=5000.0
+        )
+
+    with c2:
+        sim_late = st.number_input(
+            "Late Payments",
+            min_value=0,
+            value=int(base_row["late_payment_count"]),
+            step=1
+        )
+
+        sim_util = st.slider(
+            "Credit Utilization",
+            0.0,
+            1.0,
+            float(base_row["credit_utilization"]),
+            0.01
+        )
+
+        sim_growth = st.slider(
+            "Revenue Growth",
+            -0.50,
+            0.50,
+            float(base_row["revenue_growth"]),
+            0.01
+        )
+
+        sim_volatility = st.slider(
+            "Cashflow Volatility",
+            0.0,
+            1.0,
+            float(base_row["cashflow_volatility"]),
+            0.01
+        )
+
+    scenario = pd.DataFrame([{
+        "monthly_revenue": sim_revenue,
+        "monthly_expenses": sim_expenses,
+        "total_debt": sim_debt,
+        "monthly_emi": sim_emi,
+        "average_balance": float(base_row["average_balance"]),
+        "late_payment_count": sim_late,
+        "total_transactions": float(base_row["total_transactions"]),
+        "avg_transaction_value": float(base_row["avg_transaction_value"]),
+        "revenue_growth": sim_growth,
+        "expense_growth": float(base_row["expense_growth"]),
+        "cashflow_volatility": sim_volatility,
+        "credit_utilization": sim_util
+    }])
+
+    scenario = engineer_features(scenario)
+
+    scenario_score = calculate_credit_score(
+        scenario.iloc[0]
+    )
+
+    scenario_health = calculate_financial_health(
+        scenario.iloc[0]
+    )
+
+    scenario_risk = risk_category(scenario_score)
+
+    scenario_probability = model.predict_proba(
+        scenario[MODEL_FEATURES]
+    )[:, 1][0]
+
+    st.divider()
+
+    s1, s2, s3, s4 = st.columns(4)
+
+    s1.metric(
+        "Scenario Credit Score",
+        f"{scenario_score}/100",
+        delta=int(scenario_score - base_row["credit_score"])
+    )
+
+    s2.metric(
+        "Scenario Health",
+        f"{scenario_health}/100",
+        delta=int(scenario_health - base_row["financial_health_score"])
+    )
+
+    s3.metric(
+        "Scenario Risk",
+        scenario_risk
+    )
+
+    s4.metric(
+        "ML Risk Probability",
+        f"{scenario_probability*100:.1f}%"
+    )
+
+    st.info(
+        "The simulator recalculates CreditLens features and runs the "
+        "trained Random Forest on the scenario."
+    )
+
+
+# ============================================================
+# RISK REPORT
+# ============================================================
+
+elif page == "Risk Report":
+
+    st.markdown(
+        '<div class="section-title">📄 CreditLens Risk Report</div>',
+        unsafe_allow_html=True
+    )
+
+    selected = st.selectbox(
+        "Select Business",
+        df["business_id"].astype(str).tolist()
+    )
+
+    row = df[
+        df["business_id"].astype(str) == selected
+    ].iloc[0]
+
+    st.markdown(f"### {row['business_id']}")
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "Credit Score",
+        f"{int(row['credit_score'])}/100"
+    )
+
+    c2.metric(
+        "Risk",
+        row["risk_category"]
+    )
+
+    c3.metric(
+        "Financial Health",
+        f"{int(row['financial_health_score'])}/100"
+    )
+
+    st.divider()
+
+    report_cols = [
+        "business_id",
+        "credit_score",
+        "risk_category",
+        "financial_health_score",
+        "ml_probability",
+        "data_completeness",
+        "prediction_confidence"
+    ]
+
+    st.dataframe(
+        pd.DataFrame([
+            row[[c for c in report_cols if c in row.index]]
+        ]),
+        use_container_width=True
+    )
+
+    if REPORTLAB_AVAILABLE:
+        pdf_bytes = create_pdf_report(row)
+
+        st.download_button(
+            "⬇️ Download PDF Risk Report",
+            data=pdf_bytes,
+            file_name=f"CreditLens_{row['business_id']}_Risk_Report.pdf",
+            mime="application/pdf"
+        )
+    else:
+        st.warning(
+            "Install reportlab to enable PDF report generation."
+        )
+
+    st.caption(
+        "Prototype report only. Not a lending decision."
     )
 
 
@@ -1172,13 +1395,13 @@ elif page == "AI Copilot":
     )
 
     st.info(
-        "The current Copilot is a rule-based prototype. "
-        "An LLM-powered Copilot will be added in the next development phase."
+        "This version uses deterministic portfolio logic. "
+        "The next AI phase can connect an LLM to these verified results."
     )
 
     question = st.text_input(
         "Ask CreditLens",
-        placeholder="Which businesses are high risk?"
+        placeholder="Why is SME004 high risk?"
     )
 
     if question:
@@ -1186,6 +1409,7 @@ elif page == "AI Copilot":
         q = question.lower()
 
         if "high risk" in q:
+
             high = df[
                 df["risk_category"] == "High Risk"
             ]
@@ -1194,21 +1418,23 @@ elif page == "AI Copilot":
                 f"CreditLens found {len(high)} high-risk business(es)."
             )
 
-            if len(high) > 0:
-                cols = [
-                    c for c in [
-                        "business_id",
-                        "credit_score",
-                        "financial_health_score"
+            st.dataframe(
+                high[
+                    [
+                        c for c in [
+                            "business_id",
+                            "credit_score",
+                            "financial_health_score",
+                            "ml_probability"
+                        ]
+                        if c in high.columns
                     ]
-                    if c in high.columns
-                ]
-                st.dataframe(
-                    high[cols],
-                    use_container_width=True
-                )
+                ],
+                use_container_width=True
+            )
 
         elif "anomal" in q:
+
             count = int(
                 (df["anomaly_status"] == "Anomaly").sum()
             )
@@ -1217,47 +1443,59 @@ elif page == "AI Copilot":
                 f"CreditLens detected {count} anomalous record(s)."
             )
 
-        elif "score" in q:
+        elif "average" in q and "revenue" in q:
+
             st.info(
-                f"The average Credit Intelligence Score is "
+                f"Average monthly revenue is "
+                f"₹{df['monthly_revenue'].mean():,.0f}."
+            )
+
+        elif "score" in q:
+
+            st.info(
+                f"Average Credit Intelligence Score is "
                 f"{df['credit_score'].mean():.1f}/100."
             )
 
         elif "health" in q:
+
             st.info(
-                f"The average Financial Health Score is "
+                f"Average Financial Health Score is "
                 f"{df['financial_health_score'].mean():.1f}/100."
             )
 
         elif "best" in q or "lowest risk" in q:
+
             best = df.sort_values(
                 "credit_score",
                 ascending=False
             ).head(5)
 
             st.success(
-                "Here are the strongest businesses by Credit Intelligence Score."
+                "Strongest businesses by Credit Intelligence Score:"
             )
 
-            cols = [
-                c for c in [
-                    "business_id",
-                    "credit_score",
-                    "financial_health_score",
-                    "risk_category"
-                ]
-                if c in best.columns
-            ]
-
             st.dataframe(
-                best[cols],
+                best[
+                    [
+                        c for c in [
+                            "business_id",
+                            "credit_score",
+                            "financial_health_score",
+                            "risk_category"
+                        ]
+                        if c in best.columns
+                    ]
+                ],
                 use_container_width=True
             )
 
         else:
             st.info(
-                "Try asking about high-risk businesses, anomalies, "
-                "credit score, financial health, or lowest-risk businesses."
+                "Try: 'Which businesses are high risk?', "
+                "'Show anomalies', 'What is the average score?', "
+                "'What is the financial health?', or "
+                "'Which businesses are lowest risk?'"
             )
 
 
@@ -1269,5 +1507,5 @@ st.divider()
 
 st.caption(
     "CreditLens AI • SME Credit Intelligence Prototype • "
-    "AI/ML model trained on synthetic data"
+    "ML model trained on synthetic data • Not a lending decision"
 )

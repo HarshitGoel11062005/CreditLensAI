@@ -1567,6 +1567,209 @@ df = st.session_state.analysis_df
 # DASHBOARD
 # ============================================================
 
+# ============================================================
+# PHASE 9 — CREDIT SCORE SIMULATOR HELPERS
+# ============================================================
+
+def simulate_financial_scenario(base_row, changes):
+    """Create a one-record what-if scenario and score it with the active model."""
+    scenario = pd.DataFrame([base_row.to_dict()])
+    for col, value in changes.items():
+        scenario[col] = value
+
+    for col in BASE_FEATURES:
+        if col not in scenario.columns:
+            scenario[col] = DEFAULTS[col]
+        scenario[col] = pd.to_numeric(scenario[col], errors="coerce").fillna(DEFAULTS[col])
+
+    scenario = engineer_features(scenario)
+    scenario["ml_prediction"] = model.predict(scenario[MODEL_FEATURES])
+    scenario["ml_probability"] = model.predict_proba(scenario[MODEL_FEATURES])[:, 1]
+    scenario["credit_score"] = scenario.apply(calculate_credit_score, axis=1)
+    scenario["risk_category"] = scenario["credit_score"].apply(risk_category)
+    scenario["financial_health_score"] = scenario.apply(calculate_financial_health, axis=1)
+
+    return (
+        scenario,
+        int(scenario.iloc[0]["credit_score"]),
+        int(scenario.iloc[0]["financial_health_score"]),
+        str(scenario.iloc[0]["risk_category"]),
+        float(scenario.iloc[0]["ml_probability"]),
+    )
+
+
+def scenario_action_summary(base_row, scenario_row):
+    """Explain the largest financial changes between baseline and scenario."""
+    checks = [
+        ("Monthly Revenue", "monthly_revenue", "higher is generally favorable"),
+        ("Monthly Expenses", "monthly_expenses", "lower is generally favorable"),
+        ("Total Debt", "total_debt", "lower is generally favorable"),
+        ("Monthly EMI", "monthly_emi", "lower is generally favorable"),
+        ("Average Balance", "average_balance", "higher is generally favorable"),
+        ("Late Payments", "late_payment_count", "lower is generally favorable"),
+        ("Credit Utilization", "credit_utilization", "lower is generally favorable"),
+        ("Revenue Growth", "revenue_growth", "higher is generally favorable"),
+        ("Cashflow Volatility", "cashflow_volatility", "lower is generally favorable"),
+    ]
+    rows = []
+    for label, col, direction in checks:
+        base = float(base_row[col])
+        scen = float(scenario_row[col])
+        change = scen - base
+        if abs(change) < 1e-9:
+            impact = "Unchanged"
+        elif col in {"monthly_expenses", "total_debt", "monthly_emi", "late_payment_count", "credit_utilization", "cashflow_volatility"}:
+            impact = "Positive" if change < 0 else "Negative"
+        else:
+            impact = "Positive" if change > 0 else "Negative"
+        rows.append({
+            "Metric": label,
+            "Baseline": base,
+            "Scenario": scen,
+            "Change": change,
+            "Impact": impact,
+            "Interpretation": direction,
+        })
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# PHASE 10 — MODEL TRAINING & VALIDATION HELPERS
+# ============================================================
+
+def find_training_target(df):
+    """Detect a likely supervised-learning target column."""
+    preferred = [
+        "high_risk", "risk_flag", "default_flag", "default", "risk_label",
+        "risk", "target", "label", "outcome"
+    ]
+    normalized = {str(c).strip().lower().replace(" ", "_"): c for c in df.columns}
+    for name in preferred:
+        if name in normalized:
+            return normalized[name]
+    return df.columns[-1] if len(df.columns) else None
+
+
+def prepare_training_data(training_df, target_col):
+    """Prepare a labeled dataset using the same CreditLens feature pipeline."""
+    work = normalize_columns(training_df.copy())
+    if target_col not in work.columns:
+        # target_col may have been renamed by normalization
+        target_clean = str(target_col).strip().lower().replace(" ", "_")
+        lookup = {str(c).strip().lower().replace(" ", "_"): c for c in work.columns}
+        target_col = lookup.get(target_clean, target_col)
+    if target_col not in work.columns:
+        raise ValueError("Selected target column could not be found.")
+
+    y_raw = work[target_col]
+    valid = y_raw.notna()
+    work = work.loc[valid].copy()
+    y_raw = y_raw.loc[valid]
+
+    # Map common binary labels to 0/1.
+    if pd.api.types.is_bool_dtype(y_raw):
+        y = y_raw.astype(int)
+    elif pd.api.types.is_numeric_dtype(y_raw):
+        numeric = pd.to_numeric(y_raw, errors="coerce")
+        if numeric.isna().any():
+            raise ValueError("The target contains non-numeric values that could not be interpreted.")
+        unique = sorted(pd.unique(numeric))
+        if len(unique) != 2:
+            raise ValueError("The target must contain exactly two classes.")
+        mapping = {unique[0]: 0, unique[1]: 1}
+        y = numeric.map(mapping).astype(int)
+    else:
+        labels = y_raw.astype(str).str.strip().str.lower()
+        positive = {"1", "true", "yes", "y", "high", "high risk", "default", "bad", "risk"}
+        negative = {"0", "false", "no", "n", "low", "low risk", "medium", "medium risk", "good", "normal", "no default"}
+        mapped = []
+        for value in labels:
+            if value in positive:
+                mapped.append(1)
+            elif value in negative:
+                mapped.append(0)
+            else:
+                mapped.append(None)
+        if any(v is None for v in mapped):
+            unique = list(pd.unique(labels))
+            if len(unique) != 2:
+                raise ValueError("The target must contain exactly two recognizable classes.")
+            mapping = {unique[0]: 0, unique[1]: 1}
+            y = labels.map(mapping).astype(int)
+        else:
+            y = pd.Series(mapped, index=labels.index, dtype=int)
+
+    if y.nunique() != 2:
+        raise ValueError("The target must contain exactly two classes.")
+    if y.value_counts().min() < 5:
+        raise ValueError("Each target class needs at least 5 records for reliable cross-validation.")
+
+    # Build the exact 18-feature input used by CreditLens.
+    supplied = []
+    for col in BASE_FEATURES:
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+            supplied.append(col)
+
+    if "monthly_expenses" not in work.columns and "monthly_revenue" in work.columns:
+        for pcol in ["monthly_profit", "profit", "net_profit"]:
+            if pcol in work.columns:
+                profit = pd.to_numeric(work[pcol], errors="coerce")
+                work["monthly_expenses"] = work["monthly_revenue"] - profit
+                supplied.append("monthly_expenses")
+                break
+
+    for col in BASE_FEATURES:
+        if col not in work.columns:
+            work[col] = DEFAULTS[col]
+        work[col] = work[col].fillna(DEFAULTS[col])
+
+    work = engineer_features(work)
+    X = work[MODEL_FEATURES].copy()
+    coverage = round(100 * len(set(supplied)) / len(BASE_FEATURES), 1)
+    return X, y.reset_index(drop=True), coverage
+
+
+def train_and_validate_model(X, y):
+    """Train a Random Forest candidate and evaluate it with holdout + 5-fold CV."""
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.20, random_state=42, stratify=y
+    )
+    candidate = RandomForestClassifier(
+        n_estimators=300,
+        random_state=42,
+        class_weight="balanced",
+        n_jobs=-1,
+    )
+    candidate.fit(X_train, y_train)
+
+    pred = candidate.predict(X_test)
+    prob = candidate.predict_proba(X_test)[:, 1]
+    cv_splits = min(5, int(y.value_counts().min()))
+    cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=42)
+    cv_scores = cross_val_score(candidate, X, y, cv=cv, scoring="roc_auc", n_jobs=-1)
+
+    metrics = {
+        "Accuracy": accuracy_score(y_test, pred),
+        "Precision": precision_score(y_test, pred, zero_division=0),
+        "Recall": recall_score(y_test, pred, zero_division=0),
+        "F1": f1_score(y_test, pred, zero_division=0),
+        "ROC-AUC": roc_auc_score(y_test, prob),
+        "CV ROC-AUC Mean": float(cv_scores.mean()),
+        "CV ROC-AUC Std": float(cv_scores.std()),
+    }
+    return candidate, metrics
+
+
+def model_health_label(cv_auc):
+    if cv_auc >= 0.85:
+        return "Strong validation signal"
+    if cv_auc >= 0.70:
+        return "Moderate validation signal"
+    return "Needs further validation"
+
+
+
 if page == "Dashboard":
 
     st.markdown(

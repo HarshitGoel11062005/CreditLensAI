@@ -511,6 +511,150 @@ def analyze_data(input_df):
     return df, "OK", info
 
 
+
+# ============================================================
+# PHASE 4 — EXPLAINABLE AI
+# ============================================================
+
+def explain_risk(row):
+    """
+    Explain the CreditLens result using:
+    1. Financial/rule-based drivers that directly affect the CreditLens score.
+    2. Random Forest feature importance as model-level context.
+
+    This is intentionally transparent and does not claim that feature
+    importance alone is a causal explanation.
+    """
+    risk_drivers = []
+    positive_drivers = []
+
+    # Rule-based explanations aligned with calculate_credit_score().
+    dti = float(row["debt_to_income"])
+    expense_ratio = float(row["expense_ratio"])
+    late = float(row["late_payment_count"])
+    volatility = float(row["cashflow_volatility"])
+    utilization = float(row["credit_utilization"])
+    growth = float(row["revenue_growth"])
+    cashflow = float(row["cashflow"])
+
+    if dti > 0.50:
+        risk_drivers.append(("Debt-to-Income", dti, "High", "EMI is high relative to monthly revenue."))
+    elif dti > 0.35:
+        risk_drivers.append(("Debt-to-Income", dti, "Medium", "Debt servicing is becoming significant relative to revenue."))
+    elif dti < 0.30:
+        positive_drivers.append(("Debt-to-Income", dti, "Healthy", "Debt servicing is relatively low compared with revenue."))
+
+    if expense_ratio > 0.85:
+        risk_drivers.append(("Expense Ratio", expense_ratio, "High", "A large share of revenue is being consumed by expenses."))
+    elif expense_ratio > 0.70:
+        risk_drivers.append(("Expense Ratio", expense_ratio, "Medium", "Operating expenses are relatively high compared with revenue."))
+    elif expense_ratio < 0.70:
+        positive_drivers.append(("Expense Ratio", expense_ratio, "Healthy", "Expenses are relatively controlled compared with revenue."))
+
+    if late >= 5:
+        risk_drivers.append(("Late Payments", late, "High", "Frequent late payments indicate repayment stress."))
+    elif late >= 3:
+        risk_drivers.append(("Late Payments", late, "Medium", "Multiple late payments may indicate repayment pressure."))
+    elif late == 0:
+        positive_drivers.append(("Late Payments", late, "Healthy", "No late payments were reported."))
+
+    if volatility > 0.60:
+        risk_drivers.append(("Cashflow Volatility", volatility, "High", "Cashflow is highly variable."))
+    elif volatility > 0.40:
+        risk_drivers.append(("Cashflow Volatility", volatility, "Medium", "Cashflow shows noticeable variability."))
+    elif volatility < 0.40:
+        positive_drivers.append(("Cashflow Volatility", volatility, "Healthy", "Cashflow volatility is relatively controlled."))
+
+    if utilization > 0.80:
+        risk_drivers.append(("Credit Utilization", utilization, "High", "A high proportion of available credit is being used."))
+    elif utilization > 0.60:
+        risk_drivers.append(("Credit Utilization", utilization, "Medium", "Credit utilization is moderately high."))
+    elif utilization < 0.60:
+        positive_drivers.append(("Credit Utilization", utilization, "Healthy", "Credit utilization is relatively controlled."))
+
+    if growth < -0.10:
+        risk_drivers.append(("Revenue Growth", growth, "High", "Revenue is declining materially."))
+    elif growth < 0.05:
+        risk_drivers.append(("Revenue Growth", growth, "Medium", "Revenue growth is weak or limited."))
+    elif growth > 0.10:
+        positive_drivers.append(("Revenue Growth", growth, "Strong", "Revenue is growing strongly."))
+
+    if cashflow <= 0:
+        risk_drivers.append(("Cashflow", cashflow, "High", "Monthly expenses are at or above monthly revenue."))
+    elif cashflow > 0:
+        positive_drivers.append(("Cashflow", cashflow, "Healthy", "Monthly revenue exceeds monthly expenses."))
+
+    # Model-level feature importance.
+    model_importance = []
+    if hasattr(model, "feature_importances_"):
+        importance_map = dict(zip(MODEL_FEATURES, model.feature_importances_))
+        for feature, importance in sorted(
+            importance_map.items(), key=lambda x: x[1], reverse=True
+        )[:8]:
+            model_importance.append((feature, float(importance)))
+
+    # Make a compact human-readable summary.
+    if risk_drivers:
+        top = risk_drivers[:3]
+        summary = "The strongest observed risk signals are " + ", ".join(
+            item[0] for item in top
+        ) + "."
+    else:
+        summary = "No major rule-based risk drivers were triggered."
+
+    recommendations = []
+    if dti > 0.50:
+        recommendations.append("Reduce debt servicing pressure relative to revenue.")
+    elif dti > 0.35:
+        recommendations.append("Monitor EMI and debt levels closely.")
+
+    if expense_ratio > 0.85:
+        recommendations.append("Reduce operating expenses and protect positive cashflow.")
+    elif expense_ratio > 0.70:
+        recommendations.append("Look for opportunities to improve expense efficiency.")
+
+    if late >= 3:
+        recommendations.append("Improve repayment discipline and avoid further late payments.")
+    elif late >= 1:
+        recommendations.append("Maintain consistent on-time repayment.")
+
+    if utilization > 0.80:
+        recommendations.append("Reduce credit utilization where feasible.")
+    elif utilization > 0.60:
+        recommendations.append("Keep credit utilization under closer control.")
+
+    if growth < 0:
+        recommendations.append("Focus on stabilizing revenue and reversing the decline.")
+
+    if cashflow <= 0:
+        recommendations.append("Prioritize restoring positive monthly cashflow.")
+
+    if not recommendations:
+        recommendations.append("Maintain current financial discipline and monitor trends.")
+
+    return {
+        "risk_drivers": risk_drivers,
+        "positive_drivers": positive_drivers,
+        "model_importance": model_importance,
+        "summary": summary,
+        "recommendations": recommendations[:5],
+    }
+
+
+def format_driver_value(name, value):
+    if name in {"Debt-to-Income", "Expense Ratio", "Cashflow Volatility"}:
+        return f"{value:.2f}"
+    if name == "Credit Utilization":
+        return f"{value * 100:.1f}%"
+    if name == "Revenue Growth":
+        return f"{value * 100:.1f}%"
+    if name == "Cashflow":
+        return f"₹{value:,.0f}"
+    if name == "Late Payments":
+        return f"{int(value)}"
+    return f"{value:.2f}"
+
+
 # ============================================================
 # REPORT GENERATION
 # ============================================================
@@ -976,6 +1120,87 @@ elif page == "Risk Analysis":
             st.warning(item)
         if not risks:
             st.success("No major rule-based risk factors found.")
+
+    st.divider()
+
+    # ========================================================
+    # PHASE 4 — EXPLAINABLE AI
+    # ========================================================
+    explanation = explain_risk(row)
+
+    st.markdown("### 🧠 Explainable AI — Why this result?")
+
+    st.info(
+        f"**CreditLens explanation:** {explanation['summary']} "
+        "These explanations combine transparent financial rules with "
+        "Random Forest model feature importance."
+    )
+
+    ex_left, ex_right = st.columns(2)
+
+    with ex_left:
+        st.markdown("#### 🔴 Top Risk Drivers")
+        if explanation["risk_drivers"]:
+            for name, value, severity, detail in explanation["risk_drivers"][:6]:
+                if severity == "High":
+                    st.error(
+                        f"**{name} — {format_driver_value(name, value)}**  \n"
+                        f"{detail}"
+                    )
+                else:
+                    st.warning(
+                        f"**{name} — {format_driver_value(name, value)}**  \n"
+                        f"{detail}"
+                    )
+        else:
+            st.success("No major rule-based risk drivers were triggered.")
+
+    with ex_right:
+        st.markdown("#### 🟢 Positive Factors")
+        if explanation["positive_drivers"]:
+            for name, value, strength, detail in explanation["positive_drivers"][:6]:
+                st.success(
+                    f"**{name} — {format_driver_value(name, value)}**  \n"
+                    f"{detail}"
+                )
+        else:
+            st.info("No strong positive indicators were identified.")
+
+    st.markdown("#### 📊 Model Feature Importance")
+    if explanation["model_importance"]:
+        imp_df = pd.DataFrame(
+            explanation["model_importance"],
+            columns=["Feature", "Importance"]
+        )
+        imp_df["Importance"] = imp_df["Importance"] * 100
+        imp_df["Importance"] = imp_df["Importance"].round(2)
+
+        chart_col, table_col = st.columns([2, 1])
+        with chart_col:
+            st.bar_chart(
+                imp_df.set_index("Feature")["Importance"],
+                use_container_width=True
+            )
+        with table_col:
+            st.dataframe(
+                imp_df.rename(columns={"Importance": "Importance (%)"}),
+                use_container_width=True,
+                hide_index=True
+            )
+    else:
+        st.info("Model feature importance is unavailable for this model.")
+
+    st.markdown("#### 💡 Recommended Actions")
+    for recommendation in explanation["recommendations"]:
+        st.write(f"• {recommendation}")
+
+    st.caption(
+        "Explainability note: Random Forest feature importance shows which "
+        "features contributed most to the model's overall decisions across "
+        "the trained dataset; it is not a causal explanation for an individual "
+        "prediction. The risk-driver cards above use transparent CreditLens "
+        "financial rules for business-level interpretation."
+    )
 
     st.divider()
 

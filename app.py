@@ -1065,6 +1065,245 @@ def create_pdf_report(row, explanation=None):
 
 
 # ============================================================
+
+# ============================================================
+# PHASE 7 — HISTORICAL FINANCIAL ANALYSIS
+# ============================================================
+
+DATE_ALIASES = {
+    "date": "analysis_date",
+    "datetime": "analysis_date",
+    "timestamp": "analysis_date",
+    "month": "analysis_date",
+    "period": "analysis_date",
+    "transaction date": "analysis_date",
+    "transaction_date": "analysis_date",
+    "statement date": "analysis_date",
+    "statement_date": "analysis_date",
+}
+
+def normalize_historical_columns(df):
+    df = df.copy()
+    rename_map = {}
+    for col in df.columns:
+        cleaned = str(col).strip().lower().replace("_", " ")
+        if cleaned in DATE_ALIASES:
+            rename_map[col] = DATE_ALIASES[cleaned]
+    df.rename(columns=rename_map, inplace=True)
+    return df
+
+
+def detect_date_column(df):
+    candidates = [
+        "analysis_date", "date", "month", "period",
+        "transaction_date", "statement_date", "datetime", "timestamp"
+    ]
+    for col in candidates:
+        if col in df.columns:
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            if parsed.notna().sum() >= 2:
+                return col
+    for col in df.columns:
+        name = str(col).strip().lower().replace("_", " ")
+        if any(token in name for token in ["date", "month", "period", "time"]):
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            if parsed.notna().sum() >= 2:
+                return col
+    return None
+
+
+def build_historical_analysis(raw_df):
+    df = normalize_historical_columns(normalize_columns(raw_df))
+    date_col = detect_date_column(df)
+    if date_col is None:
+        return None, "NO_DATE", None
+
+    df["analysis_date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df[df["analysis_date"].notna()].copy()
+    if len(df) < 2:
+        return None, "INSUFFICIENT_DATES", None
+
+    if "business_id" not in df.columns:
+        for possible in ["business", "business name", "company", "company name", "id"]:
+            if possible in df.columns:
+                df["business_id"] = df[possible].astype(str)
+                break
+    if "business_id" not in df.columns:
+        df["business_id"] = "Portfolio"
+
+    numeric_cols = [
+        "monthly_revenue", "monthly_expenses", "total_debt",
+        "monthly_emi", "average_balance", "late_payment_count",
+        "total_transactions", "avg_transaction_value"
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    defaults = {
+        "monthly_revenue": 0.0, "monthly_expenses": 0.0,
+        "total_debt": 0.0, "monthly_emi": 0.0,
+        "average_balance": 0.0, "late_payment_count": 0.0,
+        "total_transactions": 0.0, "avg_transaction_value": 0.0
+    }
+    for col, default in defaults.items():
+        if col not in df.columns:
+            df[col] = default
+        else:
+            df[col] = df[col].fillna(default)
+
+    df["cashflow"] = df["monthly_revenue"] - df["monthly_expenses"]
+    df["period"] = df["analysis_date"].dt.to_period("M").dt.to_timestamp()
+
+    historical = (
+        df.groupby("period", as_index=False)
+        .agg(
+            monthly_revenue=("monthly_revenue", "sum"),
+            monthly_expenses=("monthly_expenses", "sum"),
+            total_debt=("total_debt", "mean"),
+            monthly_emi=("monthly_emi", "mean"),
+            average_balance=("average_balance", "mean"),
+            late_payment_count=("late_payment_count", "sum"),
+            total_transactions=("total_transactions", "sum"),
+            avg_transaction_value=("avg_transaction_value", "mean"),
+            cashflow=("cashflow", "sum"),
+        )
+        .sort_values("period")
+        .reset_index(drop=True)
+    )
+
+    # Avoid double-counting monthly totals when the same monthly value
+    # is repeated across transaction rows.
+    repeated = df.groupby("period").agg(
+        revenue_unique=("monthly_revenue", "nunique"),
+        expense_unique=("monthly_expenses", "nunique"),
+        row_count=("monthly_revenue", "size")
+    )
+    for period, check in repeated.iterrows():
+        mask = historical["period"] == period
+        rows = df.loc[df["period"] == period]
+        if check["row_count"] > 1 and check["revenue_unique"] == 1:
+            historical.loc[mask, "monthly_revenue"] = rows["monthly_revenue"].iloc[0]
+        if check["row_count"] > 1 and check["expense_unique"] == 1:
+            historical.loc[mask, "monthly_expenses"] = rows["monthly_expenses"].iloc[0]
+
+    historical["cashflow"] = historical["monthly_revenue"] - historical["monthly_expenses"]
+
+    for new_col, source in [
+        ("revenue_mom", "monthly_revenue"),
+        ("expense_mom", "monthly_expenses"),
+        ("debt_mom", "total_debt"),
+        ("cashflow_mom", "cashflow")
+    ]:
+        historical[new_col] = (
+            historical[source].pct_change()
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0)
+        )
+
+    historical["revenue_3m_avg"] = historical["monthly_revenue"].rolling(3, min_periods=1).mean()
+    historical["expense_3m_avg"] = historical["monthly_expenses"].rolling(3, min_periods=1).mean()
+
+    signals = []
+    if len(historical) >= 2:
+        latest = historical.iloc[-1]
+        previous = historical.iloc[-2]
+
+        if latest["revenue_mom"] <= -0.15:
+            signals.append(("Revenue Decline", "High",
+                            f"Revenue fell {abs(latest['revenue_mom'])*100:.1f}% from the previous period."))
+        elif latest["revenue_mom"] < 0:
+            signals.append(("Revenue Weakness", "Medium",
+                            f"Revenue declined {abs(latest['revenue_mom'])*100:.1f}% from the previous period."))
+
+        if latest["expense_mom"] >= 0.15:
+            signals.append(("Expense Spike", "High",
+                            f"Expenses increased {latest['expense_mom']*100:.1f}% from the previous period."))
+
+        if latest["cashflow"] < 0:
+            signals.append(("Negative Cashflow", "High",
+                            "Latest-period expenses exceed revenue."))
+        elif latest["cashflow"] < previous["cashflow"]:
+            signals.append(("Cashflow Deterioration", "Medium",
+                            "Cashflow has weakened versus the previous period."))
+
+        if latest["debt_mom"] >= 0.15:
+            signals.append(("Debt Increase", "High",
+                            f"Debt increased {latest['debt_mom']*100:.1f}% from the previous period."))
+
+        if latest["average_balance"] < latest["monthly_expenses"] * 0.25:
+            signals.append(("Low Liquidity Buffer", "Medium",
+                            "Average balance is below 25% of latest monthly expenses."))
+
+    if len(historical) >= 3:
+        recent = historical.tail(3)
+        if (recent["monthly_revenue"].iloc[-1] < recent["monthly_revenue"].iloc[0]
+                and recent["cashflow"].iloc[-1] < recent["cashflow"].iloc[0]):
+            signals.append(("Deteriorating Trend", "High",
+                            "Revenue and cashflow both deteriorated across recent periods."))
+
+    if not signals:
+        signals.append(("Stable Trend", "Low",
+                        "No major historical warning signal was detected."))
+
+    def pct_change(first, last):
+        return np.nan if first == 0 else (last - first) / abs(first)
+
+    first, last = historical.iloc[0], historical.iloc[-1]
+    info = {
+        "periods": len(historical),
+        "start_period": first["period"],
+        "end_period": last["period"],
+        "revenue_change": pct_change(first["monthly_revenue"], last["monthly_revenue"]),
+        "expense_change": pct_change(first["monthly_expenses"], last["monthly_expenses"]),
+        "cashflow_change": pct_change(first["cashflow"], last["cashflow"]),
+        "debt_change": pct_change(first["total_debt"], last["total_debt"]),
+        "signals": signals,
+        "date_column": date_col,
+    }
+    return historical, "OK", info
+
+
+def build_business_history(raw_df, selected_business):
+    df = normalize_historical_columns(normalize_columns(raw_df))
+    date_col = detect_date_column(df)
+    if date_col is None:
+        return None
+    df["analysis_date"] = pd.to_datetime(df[date_col], errors="coerce")
+    df = df[df["analysis_date"].notna()].copy()
+
+    if "business_id" not in df.columns:
+        for possible in ["business", "business name", "company", "company name", "id"]:
+            if possible in df.columns:
+                df["business_id"] = df[possible].astype(str)
+                break
+    if "business_id" not in df.columns:
+        return None
+
+    df["business_id"] = df["business_id"].astype(str)
+    return df[df["business_id"] == str(selected_business)].copy()
+
+
+def historical_signal_count(historical):
+    if historical is None or len(historical) < 2:
+        return 0
+    latest = historical.iloc[-1]
+    score = 0
+    if latest["revenue_mom"] <= -0.15:
+        score += 2
+    elif latest["revenue_mom"] < 0:
+        score += 1
+    if latest["expense_mom"] >= 0.15:
+        score += 2
+    if latest["cashflow"] < 0:
+        score += 2
+    if latest["debt_mom"] >= 0.15:
+        score += 2
+    if latest["average_balance"] < latest["monthly_expenses"] * 0.25:
+        score += 1
+    return min(score, 9)
+
+
 # SESSION STATE
 # ============================================================
 
@@ -1077,6 +1316,9 @@ if "source_name" not in st.session_state:
 
 if "uploaded_name" not in st.session_state:
     st.session_state.uploaded_name = None
+
+if "raw_input_df" not in st.session_state:
+    st.session_state.raw_input_df = None
 
 
 # ============================================================
@@ -1093,6 +1335,7 @@ page = st.sidebar.radio(
         "Risk Analysis",
         "Data Intelligence",
         "Anomaly Detection",
+        "Historical Analysis",
         "Credit Simulator",
         "Risk Report",
         "AI Copilot"
@@ -1117,6 +1360,8 @@ if uploaded_file is not None:
                 input_df = pd.read_excel(uploaded_file)
             else:
                 input_df = pd.read_csv(uploaded_file)
+
+            st.session_state.raw_input_df = input_df.copy()
 
             analyzed, status, info = analyze_data(input_df)
 
@@ -1896,6 +2141,251 @@ elif page == "Anomaly Detection":
 
 # CREDIT SIMULATOR
 # ============================================================
+
+
+elif page == "Historical Analysis":
+
+    st.markdown(
+        '<div class="section-title">📈 Historical Financial Analysis</div>',
+        unsafe_allow_html=True
+    )
+    st.write(
+        "Analyze multi-period financial performance and identify early-warning "
+        "signals in revenue, expenses, cashflow, debt and liquidity."
+    )
+
+    historical_source = st.session_state.get("raw_input_df")
+
+    if historical_source is None:
+        st.info(
+            "Upload a CSV or Excel file containing at least two dated periods "
+            "to activate historical analysis."
+        )
+    else:
+        historical, hist_status, hist_info = build_historical_analysis(
+            historical_source
+        )
+
+        if hist_status != "OK":
+            if hist_status == "NO_DATE":
+                st.warning(
+                    "No usable date column was found. Use a column such as "
+                    "`date`, `month`, `period`, `transaction_date`, or "
+                    "`statement_date`."
+                )
+            else:
+                st.warning("At least two valid dated records are required.")
+        else:
+            st.success(
+                f"Detected {hist_info['periods']} monthly periods using "
+                f"**{hist_info['date_column']}**."
+            )
+
+            latest = historical.iloc[-1]
+
+            def fmt_change(v):
+                return "N/A" if pd.isna(v) else f"{v*100:+.1f}%"
+
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric(
+                "Latest Revenue",
+                f"₹{latest['monthly_revenue']:,.0f}",
+                fmt_change(latest["revenue_mom"])
+            )
+            h2.metric(
+                "Latest Expenses",
+                f"₹{latest['monthly_expenses']:,.0f}",
+                fmt_change(latest["expense_mom"])
+            )
+            h3.metric(
+                "Latest Cashflow",
+                f"₹{latest['cashflow']:,.0f}",
+                fmt_change(latest["cashflow_mom"])
+            )
+            h4.metric(
+                "Latest Debt",
+                f"₹{latest['total_debt']:,.0f}",
+                fmt_change(latest["debt_mom"])
+            )
+
+            st.divider()
+            st.markdown("### 📊 Financial Trend")
+
+            trend_choice = st.selectbox(
+                "Select trend to visualize",
+                [
+                    "Revenue vs Expenses",
+                    "Cashflow",
+                    "Debt",
+                    "Average Balance",
+                    "Transactions"
+                ],
+                key="historical_trend_choice"
+            )
+
+            trend_df = historical.set_index("period")
+
+            if trend_choice == "Revenue vs Expenses":
+                st.line_chart(
+                    trend_df[["monthly_revenue", "monthly_expenses"]].rename(
+                        columns={
+                            "monthly_revenue": "Revenue",
+                            "monthly_expenses": "Expenses"
+                        }
+                    )
+                )
+            elif trend_choice == "Cashflow":
+                st.line_chart(
+                    trend_df[["cashflow"]].rename(columns={"cashflow": "Cashflow"})
+                )
+            elif trend_choice == "Debt":
+                st.line_chart(
+                    trend_df[["total_debt"]].rename(columns={"total_debt": "Total Debt"})
+                )
+            elif trend_choice == "Average Balance":
+                st.line_chart(
+                    trend_df[["average_balance"]].rename(
+                        columns={"average_balance": "Average Balance"}
+                    )
+                )
+            else:
+                st.line_chart(
+                    trend_df[["total_transactions"]].rename(
+                        columns={"total_transactions": "Transactions"}
+                    )
+                )
+
+            st.divider()
+            st.markdown("### ⚠️ Historical Early-Warning Signals")
+
+            signals = hist_info["signals"]
+            high_count = sum(s[1] == "High" for s in signals)
+            medium_count = sum(s[1] == "Medium" for s in signals)
+
+            a1, a2, a3 = st.columns(3)
+            a1.metric("High Alerts", high_count)
+            a2.metric("Medium Alerts", medium_count)
+            a3.metric(
+                "Trend Warning Score",
+                f"{historical_signal_count(historical)}/9"
+            )
+
+            for name, severity, detail in signals:
+                if severity == "High":
+                    st.error(f"**{name}** — {detail}")
+                elif severity == "Medium":
+                    st.warning(f"**{name}** — {detail}")
+                else:
+                    st.success(f"**{name}** — {detail}")
+
+            # Business-level view when multiple businesses are present.
+            raw_norm = normalize_columns(historical_source)
+            if "business_id" not in raw_norm.columns:
+                for possible in [
+                    "business", "business name", "company",
+                    "company name", "id"
+                ]:
+                    if possible in raw_norm.columns:
+                        raw_norm["business_id"] = raw_norm[possible].astype(str)
+                        break
+
+            if "business_id" in raw_norm.columns:
+                businesses = sorted(
+                    raw_norm["business_id"].astype(str).dropna().unique()
+                )
+
+                if len(businesses) > 1:
+                    st.divider()
+                    st.markdown("### 🏢 Business-Level Historical View")
+
+                    selected_business = st.selectbox(
+                        "Select Business",
+                        businesses,
+                        key="historical_business_selector"
+                    )
+
+                    business_raw = build_business_history(
+                        historical_source,
+                        selected_business
+                    )
+
+                    if business_raw is not None and len(business_raw) >= 2:
+                        bh, bs, _ = build_historical_analysis(business_raw)
+                        if bs == "OK":
+                            st.line_chart(
+                                bh.set_index("period")[
+                                    ["monthly_revenue", "monthly_expenses"]
+                                ].rename(
+                                    columns={
+                                        "monthly_revenue": "Revenue",
+                                        "monthly_expenses": "Expenses"
+                                    }
+                                )
+                            )
+                            latest_b = bh.iloc[-1]
+                            b1, b2, b3 = st.columns(3)
+                            b1.metric(
+                                "Latest Revenue",
+                                f"₹{latest_b['monthly_revenue']:,.0f}"
+                            )
+                            b2.metric(
+                                "Latest Cashflow",
+                                f"₹{latest_b['cashflow']:,.0f}"
+                            )
+                            b3.metric(
+                                "Latest Debt",
+                                f"₹{latest_b['total_debt']:,.0f}"
+                            )
+
+            st.divider()
+            st.markdown("### 📋 Historical Performance Table")
+
+            display_hist = historical[
+                [
+                    "period", "monthly_revenue", "monthly_expenses",
+                    "cashflow", "total_debt", "average_balance",
+                    "total_transactions", "revenue_mom", "expense_mom"
+                ]
+            ].copy()
+
+            display_hist["period"] = display_hist["period"].dt.strftime("%Y-%m")
+            display_hist["Revenue MoM (%)"] = (
+                display_hist.pop("revenue_mom") * 100
+            ).round(1)
+            display_hist["Expense MoM (%)"] = (
+                display_hist.pop("expense_mom") * 100
+            ).round(1)
+
+            display_hist = display_hist.rename(
+                columns={
+                    "period": "Period",
+                    "monthly_revenue": "Revenue",
+                    "monthly_expenses": "Expenses",
+                    "cashflow": "Cashflow",
+                    "total_debt": "Total Debt",
+                    "average_balance": "Average Balance",
+                    "total_transactions": "Transactions"
+                }
+            )
+
+            st.dataframe(
+                display_hist,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            st.download_button(
+                "⬇️ Download Historical Analysis CSV",
+                data=historical.to_csv(index=False).encode("utf-8"),
+                file_name="creditlens_historical_analysis.csv",
+                mime="text/csv"
+            )
+
+            st.info(
+                "Historical analysis is an early-warning trend layer. "
+                "It does not prove that a future financial event will occur."
+            )
+
 
 elif page == "Credit Simulator":
 

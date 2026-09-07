@@ -1075,6 +1075,124 @@ def create_pdf_report(row, explanation=None):
 
 # ============================================================
 
+
+# ============================================================
+# PHASE 8 — GEMINI AI COPILOT HELPERS
+# ============================================================
+
+def get_gemini_api_key():
+    """Safely read the Gemini API key from Streamlit Secrets or environment."""
+    # Streamlit Cloud / local secrets.
+    try:
+        key = st.secrets.get("GEMINI_API_KEY", None)
+        if key:
+            return str(key).strip()
+    except Exception:
+        # No secrets.toml / secrets configured. This is normal locally.
+        pass
+
+    # Environment variable fallback.
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return str(key).strip() if key else ""
+
+
+def build_ai_verified_context(df, selected_business=None):
+    """Build a compact, JSON-safe context from CreditLens-calculated outputs."""
+    context_df = df.copy()
+
+    if selected_business and "business_id" in context_df.columns:
+        context_df = context_df[
+            context_df["business_id"].astype(str) == str(selected_business)
+        ].copy()
+
+    # Keep the LLM context focused on verified CreditLens outputs.
+    preferred = [
+        "business_id", "credit_score", "risk_category",
+        "financial_health_score", "ml_probability",
+        "data_completeness", "prediction_confidence",
+        "monthly_revenue", "monthly_expenses", "cashflow",
+        "total_debt", "monthly_emi", "average_balance",
+        "late_payment_count", "revenue_growth", "expense_growth",
+        "debt_to_income", "expense_ratio", "credit_utilization",
+        "cashflow_volatility", "total_transactions",
+        "avg_transaction_value", "anomaly_status", "anomaly_severity",
+        "anomaly_score", "anomaly_reasons", "anomaly_recommendation"
+    ]
+    cols = [c for c in preferred if c in context_df.columns]
+
+    # Avoid sending an unnecessarily large prompt for large uploads.
+    records = context_df[cols].head(50).copy()
+    records = records.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+    return {
+        "selected_business": selected_business or "Portfolio-wide",
+        "record_count_in_context": int(len(context_df)),
+        "records_shown_to_model": int(len(records)),
+        "verified_creditlens_records": records.to_dict(orient="records")
+    }
+
+
+def ask_creditlens_gemini(question, df, selected_business=None,
+                           model_name="gemini-2.5-flash"):
+    """Ask Gemini to explain verified CreditLens results."""
+    api_key = get_gemini_api_key()
+    if not GEMINI_AVAILABLE:
+        return None, "The Gemini SDK is not installed. Add `google-genai` to requirements.txt."
+    if not api_key:
+        return None, "Gemini API key is not configured. Add `GEMINI_API_KEY` to Streamlit Secrets."
+
+    try:
+        client = genai.Client(api_key=api_key)
+        verified_context = build_ai_verified_context(df, selected_business)
+
+        system_instruction = """
+You are CreditLens AI Copilot, an analytical assistant for an SME credit
+intelligence dashboard.
+
+Your job is to explain ONLY the verified CreditLens results supplied in the
+context. Do not invent financial figures, businesses, scores, trends, causes,
+or facts that are not present in the context.
+
+Important rules:
+1. Treat credit_score, financial_health_score, ml_probability, anomaly fields,
+   and financial metrics as calculated CreditLens outputs.
+2. Clearly distinguish observed facts from recommendations or interpretation.
+3. If the supplied context does not contain enough information to answer,
+   say so instead of guessing.
+4. Do not claim that the model proves fraud, default, or lending eligibility.
+5. The underlying ML model is a prototype trained on synthetic data, so remind
+   the user when discussing lending decisions or production deployment.
+6. Keep answers concise, professional, and useful for a project demonstration.
+7. Use Indian Rupee formatting when discussing rupee values.
+"""
+
+        prompt = (
+            system_instruction
+            + "\n\nVERIFIED CREDITLENS CONTEXT:\n"
+            + json.dumps(verified_context, ensure_ascii=False, default=str)
+            + "\n\nUSER QUESTION:\n"
+            + str(question)
+        )
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        )
+
+        text = getattr(response, "text", None)
+        if text and str(text).strip():
+            return str(text).strip(), None
+
+        return None, "Gemini returned an empty response. Please try the question again."
+
+    except Exception as exc:
+        message = str(exc)
+        # Avoid exposing the API key or credentials in the UI.
+        if api_key and api_key in message:
+            message = message.replace(api_key, "[hidden]")
+        return None, f"Gemini request failed: {message}"
+
+
 # ============================================================
 # PHASE 7 — HISTORICAL FINANCIAL ANALYSIS
 # ============================================================

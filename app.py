@@ -501,6 +501,10 @@ def analyze_data(input_df):
     else:
         df["anomaly_status"] = "Need 5+ records"
 
+    # Phase 6: enrich the existing anomaly result with explainable
+    # financial reasons, severity and recommended actions.
+    df = detect_financial_anomalies(df)
+
     info = {
         "supplied_columns": sorted(supplied_unique),
         "estimated_columns": sorted(set(estimated)),
@@ -510,6 +514,295 @@ def analyze_data(input_df):
 
     return df, "OK", info
 
+
+
+
+# ============================================================
+# PHASE 6 — ADVANCED FINANCIAL ANOMALY INTELLIGENCE
+# ============================================================
+
+def detect_financial_anomalies(df):
+    """
+    Phase 6 anomaly engine.
+
+    Combines:
+    1. Isolation Forest batch anomaly detection already used by CreditLens.
+    2. Transparent financial rules for common abnormal patterns.
+    3. Relative-to-portfolio comparisons using robust medians.
+    4. Severity scoring and human-readable reasons.
+
+    Important:
+    Anomaly != fraud. It means the financial pattern is unusual
+    compared with the analyzed portfolio and/or defined rules.
+    """
+    df = df.copy()
+
+    # Default outputs so the UI remains stable for small datasets.
+    df["anomaly_reasons"] = ""
+    df["anomaly_severity"] = "Normal"
+    df["anomaly_score"] = 0
+    df["anomaly_recommendation"] = "No immediate anomaly action required."
+    df["rule_anomaly"] = False
+
+    numeric_cols = [
+        "monthly_revenue",
+        "monthly_expenses",
+        "total_debt",
+        "average_balance",
+        "total_transactions",
+        "avg_transaction_value",
+        "revenue_growth",
+        "expense_growth",
+        "cashflow",
+        "debt_to_income",
+        "credit_utilization",
+        "cashflow_volatility",
+    ]
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # Portfolio reference values. Median is used because it is less
+    # sensitive to extreme observations than the mean.
+    medians = {}
+    for col in numeric_cols:
+        if col in df.columns:
+            medians[col] = float(df[col].median())
+
+    def safe_ratio(value, reference):
+        if reference is None or abs(reference) < 1e-9:
+            return 1.0
+        return float(value) / abs(float(reference))
+
+    for idx, row in df.iterrows():
+        reasons = []
+        recommendations = []
+        score = 0
+        critical_count = 0
+
+        revenue = float(row["monthly_revenue"])
+        expenses = float(row["monthly_expenses"])
+        debt = float(row["total_debt"])
+        balance = float(row["average_balance"])
+        transactions = float(row["total_transactions"])
+        avg_txn = float(row["avg_transaction_value"])
+        revenue_growth = float(row["revenue_growth"])
+        expense_growth = float(row["expense_growth"])
+        cashflow = float(row["cashflow"])
+        dti = float(row["debt_to_income"])
+        utilization = float(row["credit_utilization"])
+        volatility = float(row["cashflow_volatility"])
+
+        # --------------------------------------------------------
+        # A. Revenue abnormality
+        # --------------------------------------------------------
+        rev_median = medians.get("monthly_revenue", 0)
+        if rev_median > 0:
+            rev_ratio = safe_ratio(revenue, rev_median)
+            if rev_ratio < 0.50:
+                reasons.append("Revenue is substantially below the portfolio median.")
+                recommendations.append("Review sales performance and near-term cash inflows.")
+                score += 3
+                critical_count += 1
+            elif rev_ratio > 2.50:
+                reasons.append("Revenue is substantially above the portfolio median.")
+                recommendations.append("Validate the revenue spike and confirm it is sustainable.")
+                score += 2
+
+        if revenue_growth <= -0.15:
+            reasons.append("Revenue is declining materially.")
+            recommendations.append("Investigate the cause of the revenue decline.")
+            score += 3
+            critical_count += 1
+        elif revenue_growth < -0.05:
+            reasons.append("Revenue growth is negative.")
+            recommendations.append("Monitor revenue recovery closely.")
+            score += 1
+
+        # --------------------------------------------------------
+        # B. Expense spike / margin pressure
+        # --------------------------------------------------------
+        exp_median = medians.get("monthly_expenses", 0)
+        if exp_median > 0:
+            exp_ratio = safe_ratio(expenses, exp_median)
+            if exp_ratio > 2.00:
+                reasons.append("Expenses are substantially above the portfolio median.")
+                recommendations.append("Review major cost increases and unusual outflows.")
+                score += 3
+                critical_count += 1
+            elif exp_ratio > 1.50:
+                reasons.append("Expenses are elevated relative to the portfolio.")
+                recommendations.append("Review operating expenses for unusual increases.")
+                score += 1
+
+        if expense_growth >= 0.20:
+            reasons.append("Expense growth is unusually high.")
+            recommendations.append("Check for recent cost spikes and recurring expense increases.")
+            score += 2
+            critical_count += 1
+        elif expense_growth >= 0.10:
+            reasons.append("Expenses are growing faster than normal.")
+            score += 1
+
+        if cashflow < 0:
+            reasons.append("Monthly cashflow is negative.")
+            recommendations.append("Prioritize restoring positive operating cashflow.")
+            score += 3
+            critical_count += 1
+
+        # --------------------------------------------------------
+        # C. Liquidity / balance abnormality
+        # --------------------------------------------------------
+        bal_median = medians.get("average_balance", 0)
+        if bal_median > 0:
+            bal_ratio = safe_ratio(balance, bal_median)
+            if bal_ratio < 0.35:
+                reasons.append("Average balance is unusually low.")
+                recommendations.append("Maintain a stronger cash reserve for near-term obligations.")
+                score += 2
+                critical_count += 1
+            elif bal_ratio > 3.00:
+                reasons.append("Average balance is unusually high.")
+                recommendations.append("Validate the balance movement and source of funds.")
+                score += 1
+
+        if expenses > 0 and balance / expenses < 0.25:
+            reasons.append("Cash reserves cover less than roughly one quarter of monthly expenses.")
+            recommendations.append("Build a larger operating cash buffer.")
+            score += 2
+
+        # --------------------------------------------------------
+        # D. Debt / credit stress
+        # --------------------------------------------------------
+        debt_median = medians.get("total_debt", 0)
+        if debt_median > 0:
+            debt_ratio = safe_ratio(debt, debt_median)
+            if debt_ratio > 2.50:
+                reasons.append("Debt is substantially above the portfolio median.")
+                recommendations.append("Review debt structure and repayment capacity.")
+                score += 2
+                critical_count += 1
+
+        if dti > 0.75:
+            reasons.append("Debt servicing is very high relative to revenue.")
+            recommendations.append("Reduce debt-servicing pressure where feasible.")
+            score += 3
+            critical_count += 1
+        elif dti > 0.50:
+            reasons.append("Debt servicing is elevated relative to revenue.")
+            recommendations.append("Monitor EMI and debt levels closely.")
+            score += 1
+
+        if utilization > 0.90:
+            reasons.append("Credit utilization is extremely high.")
+            recommendations.append("Reduce reliance on available credit where possible.")
+            score += 3
+            critical_count += 1
+        elif utilization > 0.80:
+            reasons.append("Credit utilization is high.")
+            recommendations.append("Keep credit utilization under closer control.")
+            score += 1
+
+        # --------------------------------------------------------
+        # E. Transaction behavior
+        # --------------------------------------------------------
+        txn_median = medians.get("total_transactions", 0)
+        if txn_median > 0:
+            txn_ratio = safe_ratio(transactions, txn_median)
+            if txn_ratio > 3.00:
+                reasons.append("Transaction volume is unusually high.")
+                recommendations.append("Review transaction activity for unusual business behavior.")
+                score += 2
+            elif txn_ratio < 0.25:
+                reasons.append("Transaction volume is unusually low.")
+                recommendations.append("Check whether operating activity has slowed.")
+                score += 2
+
+        avg_txn_median = medians.get("avg_transaction_value", 0)
+        if avg_txn_median > 0:
+            avg_txn_ratio = safe_ratio(avg_txn, avg_txn_median)
+            if avg_txn_ratio > 3.00:
+                reasons.append("Average transaction value is unusually high.")
+                recommendations.append("Validate large-value transactions and their business purpose.")
+                score += 2
+            elif avg_txn_ratio < 0.25:
+                reasons.append("Average transaction value is unusually low.")
+                score += 1
+
+        # --------------------------------------------------------
+        # F. Cashflow volatility
+        # --------------------------------------------------------
+        if volatility > 0.75:
+            reasons.append("Cashflow volatility is extremely high.")
+            recommendations.append("Investigate irregular inflows and outflows.")
+            score += 3
+            critical_count += 1
+        elif volatility > 0.60:
+            reasons.append("Cashflow volatility is high.")
+            recommendations.append("Monitor irregular cash movements.")
+            score += 2
+
+        # --------------------------------------------------------
+        # G. Isolation Forest result
+        # --------------------------------------------------------
+        if "anomaly_status" in df.columns and row["anomaly_status"] == "Anomaly":
+            score += 2
+            reasons.insert(
+                0,
+                "Isolation Forest identified this record as unusual relative to the analyzed batch."
+            )
+            recommendations.append(
+                "Review the complete financial record before taking action."
+            )
+
+        rule_anomaly = score >= 2
+        df.at[idx, "rule_anomaly"] = rule_anomaly
+        df.at[idx, "anomaly_score"] = int(min(score, 10))
+
+        # Severity is intentionally conservative.
+        if score >= 7 or critical_count >= 2:
+            severity = "High"
+        elif score >= 3:
+            severity = "Medium"
+        elif score >= 1:
+            severity = "Low"
+        else:
+            severity = "Normal"
+
+        df.at[idx, "anomaly_severity"] = severity
+        df.at[idx, "anomaly_reasons"] = " | ".join(dict.fromkeys(reasons))
+
+        if recommendations:
+            df.at[idx, "anomaly_recommendation"] = " ".join(
+                dict.fromkeys(recommendations)
+            )[:500]
+        elif severity == "Normal":
+            df.at[idx, "anomaly_recommendation"] = (
+                "No immediate anomaly action required."
+            )
+
+    return df
+
+
+def anomaly_summary(df):
+    """Return portfolio-level Phase 6 anomaly metrics."""
+    severity_counts = (
+        df["anomaly_severity"]
+        .value_counts()
+        .reindex(["High", "Medium", "Low", "Normal"], fill_value=0)
+    )
+
+    return {
+        "total": len(df),
+        "high": int(severity_counts["High"]),
+        "medium": int(severity_counts["Medium"]),
+        "low": int(severity_counts["Low"]),
+        "normal": int(severity_counts["Normal"]),
+        "flagged": int(
+            (df["anomaly_severity"] != "Normal").sum()
+        ),
+    }
 
 
 # ============================================================
@@ -1325,69 +1618,282 @@ elif page == "Data Intelligence":
 elif page == "Anomaly Detection":
 
     st.markdown(
-        '<div class="section-title">🚨 Financial Anomaly Detection</div>',
+        '<div class="section-title">🚨 Advanced Financial Anomaly Intelligence</div>',
         unsafe_allow_html=True
     )
 
-    anomaly_count = int(
-        (df["anomaly_status"] == "Anomaly").sum()
+    st.write(
+        "Phase 6 combines batch-level machine learning with transparent "
+        "financial rules to identify unusual revenue, expense, liquidity, "
+        "debt and transaction patterns."
     )
 
-    c1, c2, c3 = st.columns(3)
+    summary = anomaly_summary(df)
 
-    c1.metric("Records Analyzed", len(df))
-    c2.metric("Anomalies", anomaly_count)
-    c3.metric(
-        "Normal Records",
-        int((df["anomaly_status"] == "Normal").sum())
-    )
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    c1.metric("Records Analyzed", summary["total"])
+    c2.metric("Flagged", summary["flagged"])
+    c3.metric("High Severity", summary["high"])
+    c4.metric("Medium Severity", summary["medium"])
+    c5.metric("Normal", summary["normal"])
 
     st.divider()
 
     if len(df) < 5:
         st.warning(
-            "Upload at least 5 businesses for batch anomaly detection."
+            "Isolation Forest batch detection is most meaningful with at least "
+            "5 records. Phase 6 rule-based checks can still highlight unusual "
+            "financial patterns."
         )
 
-    anomaly_cols = [
-        "business_id",
-        "monthly_revenue",
-        "monthly_expenses",
-        "total_debt",
-        "average_balance",
-        "credit_score",
-        "risk_category",
-        "anomaly_status"
-    ]
+    # --------------------------------------------------------
+    # Severity overview
+    # --------------------------------------------------------
+    st.markdown("### 📊 Anomaly Severity Overview")
 
-    st.dataframe(
-        df[[c for c in anomaly_cols if c in df.columns]],
-        use_container_width=True
+    severity_chart = pd.Series(
+        {
+            "High": summary["high"],
+            "Medium": summary["medium"],
+            "Low": summary["low"],
+            "Normal": summary["normal"],
+        },
+        name="Businesses"
     )
 
-    anomalies = df[
-        df["anomaly_status"] == "Anomaly"
+    chart_col, info_col = st.columns([2, 1])
+
+    with chart_col:
+        st.bar_chart(severity_chart)
+
+    with info_col:
+        st.markdown("#### How CreditLens interprets severity")
+        st.write("🔴 **High** — multiple or critical abnormal signals")
+        st.write("🟠 **Medium** — meaningful unusual financial pattern")
+        st.write("🟡 **Low** — mild unusual pattern")
+        st.write("🟢 **Normal** — no material anomaly signal")
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # Main anomaly table
+    # --------------------------------------------------------
+    st.markdown("### 🔎 Anomaly Investigation")
+
+    display_cols = [
+        "business_id",
+        "anomaly_status",
+        "anomaly_severity",
+        "anomaly_score",
+        "credit_score",
+        "risk_category",
+        "monthly_revenue",
+        "monthly_expenses",
+        "cashflow",
+        "total_debt",
+        "average_balance",
+        "revenue_growth",
+        "expense_growth",
     ]
 
-    if len(anomalies) > 0:
-        st.error(
-            f"{len(anomalies)} unusual financial record(s) detected."
+    investigation = df[
+        [c for c in display_cols if c in df.columns]
+    ].copy()
+
+    st.dataframe(
+        investigation,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # Flagged records
+    # --------------------------------------------------------
+    flagged = df[
+        df["anomaly_severity"] != "Normal"
+    ].copy()
+
+    if len(flagged) > 0:
+
+        st.markdown(
+            f"### 🚨 {len(flagged)} Record(s) Requiring Anomaly Review"
         )
+
+        flagged_cols = [
+            "business_id",
+            "anomaly_severity",
+            "anomaly_score",
+            "anomaly_reasons",
+            "anomaly_recommendation",
+        ]
+
         st.dataframe(
-            anomalies[[c for c in anomaly_cols if c in anomalies.columns]],
-            use_container_width=True
+            flagged[
+                [c for c in flagged_cols if c in flagged.columns]
+            ],
+            use_container_width=True,
+            hide_index=True
         )
-    elif len(df) >= 5:
-        st.success("No unusual financial records detected.")
+
+        st.divider()
+
+        # ----------------------------------------------------
+        # Individual anomaly investigation
+        # ----------------------------------------------------
+        selected_anomaly = st.selectbox(
+            "Select an anomalous business for detailed investigation",
+            flagged["business_id"].astype(str).tolist()
+        )
+
+        anomaly_row = flagged[
+            flagged["business_id"].astype(str) == selected_anomaly
+        ].iloc[0]
+
+        st.markdown(
+            f"### 🏢 Investigation: {anomaly_row['business_id']}"
+        )
+
+        a1, a2, a3, a4 = st.columns(4)
+
+        a1.metric(
+            "Severity",
+            anomaly_row["anomaly_severity"]
+        )
+        a2.metric(
+            "Anomaly Score",
+            f"{int(anomaly_row['anomaly_score'])}/10"
+        )
+        a3.metric(
+            "Credit Score",
+            f"{int(anomaly_row['credit_score'])}/100"
+        )
+        a4.metric(
+            "ML Risk Probability",
+            f"{anomaly_row['ml_probability'] * 100:.1f}%"
+        )
+
+        st.markdown("#### 🔍 Why was this record flagged?")
+
+        reasons_text = str(
+            anomaly_row.get("anomaly_reasons", "")
+        ).strip()
+
+        if reasons_text:
+            for reason in [
+                r.strip() for r in reasons_text.split("|") if r.strip()
+            ]:
+                if anomaly_row["anomaly_severity"] == "High":
+                    st.error(f"⚠️ {reason}")
+                elif anomaly_row["anomaly_severity"] == "Medium":
+                    st.warning(f"⚠️ {reason}")
+                else:
+                    st.info(f"ℹ️ {reason}")
+        else:
+            st.success("No specific anomaly reason was triggered.")
+
+        st.markdown("#### 💡 Recommended Review Action")
+
+        st.info(
+            str(
+                anomaly_row.get(
+                    "anomaly_recommendation",
+                    "Review the financial record."
+                )
+            )
+        )
+
+        st.markdown("#### 💰 Financial Signals")
+
+        signal_df = pd.DataFrame(
+            {
+                "Signal": [
+                    "Monthly Revenue",
+                    "Monthly Expenses",
+                    "Cashflow",
+                    "Total Debt",
+                    "Average Balance",
+                    "Revenue Growth",
+                    "Expense Growth",
+                    "Debt-to-Income",
+                    "Credit Utilization",
+                    "Cashflow Volatility",
+                    "Transaction Count",
+                    "Average Transaction Value",
+                ],
+                "Value": [
+                    f"₹{anomaly_row['monthly_revenue']:,.0f}",
+                    f"₹{anomaly_row['monthly_expenses']:,.0f}",
+                    f"₹{anomaly_row['cashflow']:,.0f}",
+                    f"₹{anomaly_row['total_debt']:,.0f}",
+                    f"₹{anomaly_row['average_balance']:,.0f}",
+                    f"{anomaly_row['revenue_growth'] * 100:.1f}%",
+                    f"{anomaly_row['expense_growth'] * 100:.1f}%",
+                    f"{anomaly_row['debt_to_income']:.2f}",
+                    f"{anomaly_row['credit_utilization'] * 100:.1f}%",
+                    f"{anomaly_row['cashflow_volatility']:.2f}",
+                    f"{anomaly_row['total_transactions']:,.0f}",
+                    f"₹{anomaly_row['avg_transaction_value']:,.0f}",
+                ]
+            }
+        )
+
+        st.dataframe(
+            signal_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+        st.success(
+            "No material financial anomalies were identified in the current dataset."
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # Downloadable anomaly report
+    # --------------------------------------------------------
+    st.markdown("### 📥 Export Anomaly Analysis")
+
+    export_cols = [
+        "business_id",
+        "anomaly_status",
+        "anomaly_severity",
+        "anomaly_score",
+        "anomaly_reasons",
+        "anomaly_recommendation",
+        "credit_score",
+        "risk_category",
+        "ml_probability",
+    ]
+
+    export_df = df[
+        [c for c in export_cols if c in df.columns]
+    ].copy()
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        "⬇️ Download Anomaly Analysis CSV",
+        data=csv_bytes,
+        file_name="creditlens_phase6_anomaly_analysis.csv",
+        mime="text/csv"
+    )
 
     st.info(
-        "Current prototype trains Isolation Forest on the uploaded batch. "
-        "A production system should persist and validate a separately "
-        "trained anomaly model."
+        "Phase 6 note: an anomaly indicates an unusual financial pattern; "
+        "it does not by itself indicate fraud, default or illegal activity. "
+        "The current Isolation Forest is trained on the analyzed batch. "
+        "For production, use a separately validated anomaly model and "
+        "historical transaction-level data."
     )
 
 
 # ============================================================
+
 # CREDIT SIMULATOR
 # ============================================================
 

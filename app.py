@@ -2884,11 +2884,55 @@ elif page == "Model Center":
             st.dataframe(training_df.head(10), use_container_width=True, hide_index=True)
 
             detected_target = find_training_target(training_df)
-            target_options = list(training_df.columns)
-            default_index = target_options.index(detected_target) if detected_target in target_options else 0
-            target_col = st.selectbox("Target / risk label", target_options, index=default_index)
 
-            if st.button("🚀 Train & Validate Candidate Model", type="primary", use_container_width=True):
+            # Friendly target choices.  "High Risk" is shown explicitly when the
+            # uploaded dataset contains a high-risk target or a compatible risk label.
+            target_choices = []
+            target_lookup = {}
+            normalized_training = {str(c).strip().lower().replace(" ", "_"): c for c in training_df.columns}
+
+            if "high_risk" in normalized_training:
+                target_choices.append("High Risk")
+                target_lookup["High Risk"] = normalized_training["high_risk"]
+            elif "risk_label" in normalized_training:
+                target_choices.append("High Risk (from risk label)")
+                target_lookup["High Risk (from risk label)"] = normalized_training["risk_label"]
+            elif "risk_flag" in normalized_training:
+                target_choices.append("High Risk (from risk flag)")
+                target_lookup["High Risk (from risk flag)"] = normalized_training["risk_flag"]
+            elif "default_flag" in normalized_training:
+                target_choices.append("High Risk / Default Flag")
+                target_lookup["High Risk / Default Flag"] = normalized_training["default_flag"]
+
+            # Keep every other uploaded column available for custom supervised targets.
+            for col in training_df.columns:
+                if col not in target_lookup.values():
+                    label = str(col)
+                    if label not in target_lookup:
+                        target_choices.append(label)
+                        target_lookup[label] = col
+
+            if not target_choices:
+                st.error("No target columns are available in the uploaded dataset.")
+                target_col = None
+            else:
+                # Prefer the explicit High Risk choice whenever it exists.
+                if "High Risk" in target_choices:
+                    default_index = target_choices.index("High Risk")
+                elif detected_target in target_lookup.values():
+                    default_index = list(target_lookup.values()).index(detected_target)
+                else:
+                    default_index = 0
+
+                target_display = st.selectbox(
+                    "Target / risk label",
+                    target_choices,
+                    index=default_index,
+                    help="Choose High Risk for binary high-risk classification, or select another labeled target."
+                )
+                target_col = target_lookup[target_display]
+
+            if target_col is not None and st.button("🚀 Train & Validate Candidate Model", type="primary", use_container_width=True):
                 try:
                     X_trainable, y_trainable, feature_coverage = prepare_training_data(training_df, target_col)
                     with st.spinner("Training and validating the candidate model..."):

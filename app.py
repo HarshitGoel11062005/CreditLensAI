@@ -2,7 +2,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import os
+import json
 from sklearn.ensemble import IsolationForest
+
+# Gemini dependency for Phase 8 AI Copilot.
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
 from io import BytesIO
 
 # Optional PDF report dependency.
@@ -2614,7 +2623,7 @@ elif page == "Risk Report":
 
 
 # ============================================================
-# AI COPILOT
+# AI COPILOT — PHASE 8 GEMINI
 # ============================================================
 
 elif page == "AI Copilot":
@@ -2625,113 +2634,226 @@ elif page == "AI Copilot":
     )
 
     st.write(
-        "Ask questions about the current SME portfolio."
+        "Ask natural-language questions about the verified CreditLens portfolio."
     )
 
-    st.info(
-        "This version uses deterministic portfolio logic. "
-        "The next AI phase can connect an LLM to these verified results."
+    # ------------------------------------------------------------
+    # Gemini configuration status
+    # ------------------------------------------------------------
+    api_key_present = bool(get_gemini_api_key())
+
+    status_col1, status_col2 = st.columns([3, 1])
+
+    with status_col1:
+        if not GEMINI_AVAILABLE:
+            st.warning(
+                "Gemini SDK is not installed. Add `google-genai` to requirements.txt."
+            )
+        elif not api_key_present:
+            st.warning(
+                "Gemini API key is not configured. Add `GEMINI_API_KEY` to Streamlit Secrets."
+            )
+        else:
+            st.success("AI Copilot connected to Gemini.")
+
+    with status_col2:
+        ai_model = "gemini-2.5-flash"
+        st.caption("Model: Gemini 2.5 Flash")
+
+    # ------------------------------------------------------------
+    # Business context selector
+    # ------------------------------------------------------------
+    business_options = []
+    if "business_id" in df.columns:
+        business_options = (
+            df["business_id"]
+            .astype(str)
+            .drop_duplicates()
+            .tolist()
+        )
+
+    selected_business = None
+    if business_options:
+        selected_business = st.selectbox(
+            "Business context",
+            ["Portfolio-wide"] + business_options,
+            help="Choose a business to focus the AI explanation on."
+        )
+        if selected_business == "Portfolio-wide":
+            selected_business = None
+
+    st.caption(
+        "Phase 8 grounds Gemini on verified CreditLens outputs instead of giving it "
+        "unrestricted access to your financial data."
     )
 
-    question = st.text_input(
-        "Ask CreditLens",
-        placeholder="Why is SME004 high risk?"
+    # ------------------------------------------------------------
+    # Chat history
+    # ------------------------------------------------------------
+    if "copilot_messages" not in st.session_state:
+        st.session_state.copilot_messages = []
+
+    for message in st.session_state.copilot_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # ------------------------------------------------------------
+    # Quick prompts
+    # ------------------------------------------------------------
+    st.markdown("### Quick questions")
+    q1, q2, q3, q4 = st.columns(4)
+
+    quick_question = None
+
+    if q1.button("🔴 Explain high-risk businesses", use_container_width=True):
+        quick_question = (
+            "Which businesses are high risk, and what are the main verified reasons?"
+        )
+
+    if q2.button("📊 Portfolio health", use_container_width=True):
+        quick_question = (
+            "Give me a concise overview of the portfolio's credit score, "
+            "financial health, risk mix, and anomalies."
+        )
+
+    if q3.button("🚨 Explain anomalies", use_container_width=True):
+        quick_question = (
+            "Which anomalies were detected, what verified financial patterns "
+            "are associated with them, and what should I investigate first?"
+        )
+
+    if q4.button("💡 Improvement actions", use_container_width=True):
+        quick_question = (
+            "What are the most important analytical actions businesses should "
+            "consider based on the verified CreditLens data?"
+        )
+
+    question = st.chat_input(
+        "Ask CreditLens anything about the verified financial results..."
     )
+
+    if quick_question:
+        question = quick_question
 
     if question:
+        st.session_state.copilot_messages.append(
+            {"role": "user", "content": question}
+        )
 
-        q = question.lower()
+        with st.chat_message("user"):
+            st.markdown(question)
 
-        if "high risk" in q:
+        answer = None
+        error = None
 
-            high = df[
-                df["risk_category"] == "High Risk"
-            ]
+        if GEMINI_AVAILABLE and api_key_present:
+            with st.chat_message("assistant"):
+                with st.spinner("Gemini is analyzing the verified CreditLens results..."):
+                    answer, error = ask_creditlens_gemini(
+                        question,
+                        df,
+                        selected_business=selected_business,
+                        model_name=ai_model
+                    )
 
-            st.success(
-                f"CreditLens found {len(high)} high-risk business(es)."
-            )
-
-            st.dataframe(
-                high[
-                    [
-                        c for c in [
-                            "business_id",
-                            "credit_score",
-                            "financial_health_score",
-                            "ml_probability"
-                        ]
-                        if c in high.columns
-                    ]
-                ],
-                use_container_width=True
-            )
-
-        elif "anomal" in q:
-
-            count = int(
-                (df["anomaly_status"] == "Anomaly").sum()
-            )
-
-            st.info(
-                f"CreditLens detected {count} anomalous record(s)."
-            )
-
-        elif "average" in q and "revenue" in q:
-
-            st.info(
-                f"Average monthly revenue is "
-                f"₹{df['monthly_revenue'].mean():,.0f}."
-            )
-
-        elif "score" in q:
-
-            st.info(
-                f"Average Credit Intelligence Score is "
-                f"{df['credit_score'].mean():.1f}/100."
-            )
-
-        elif "health" in q:
-
-            st.info(
-                f"Average Financial Health Score is "
-                f"{df['financial_health_score'].mean():.1f}/100."
-            )
-
-        elif "best" in q or "lowest risk" in q:
-
-            best = df.sort_values(
-                "credit_score",
-                ascending=False
-            ).head(5)
-
-            st.success(
-                "Strongest businesses by Credit Intelligence Score:"
-            )
-
-            st.dataframe(
-                best[
-                    [
-                        c for c in [
-                            "business_id",
-                            "credit_score",
-                            "financial_health_score",
-                            "risk_category"
-                        ]
-                        if c in best.columns
-                    ]
-                ],
-                use_container_width=True
-            )
-
+                if answer:
+                    st.markdown(answer)
+                else:
+                    st.error(error or "Unable to generate a Gemini response.")
         else:
-            st.info(
-                "Try: 'Which businesses are high risk?', "
-                "'Show anomalies', 'What is the average score?', "
-                "'What is the financial health?', or "
-                "'Which businesses are lowest risk?'"
+            # Safe deterministic fallback keeps the application usable even
+            # when Gemini is not configured.
+            q = question.lower()
+
+            if "high risk" in q or "risk" in q:
+                high = (
+                    df[df["risk_category"] == "High Risk"]
+                    if "risk_category" in df.columns
+                    else pd.DataFrame()
+                )
+
+                if selected_business and "business_id" in df.columns:
+                    high = high[
+                        high["business_id"].astype(str) == str(selected_business)
+                    ]
+
+                if high.empty:
+                    answer = (
+                        "No high-risk business is present in the current verified dataset."
+                    )
+                else:
+                    ids = ", ".join(
+                        high["business_id"].astype(str).tolist()[:10]
+                    )
+                    answer = (
+                        f"CreditLens identifies {len(high)} high-risk record(s) "
+                        f"in the selected context: {ids}. Use Risk Analysis and "
+                        "Historical Analysis to inspect the verified drivers."
+                    )
+
+            elif "anomal" in q:
+                count = (
+                    int((df["anomaly_status"] == "Anomaly").sum())
+                    if "anomaly_status" in df.columns
+                    else 0
+                )
+                answer = (
+                    f"CreditLens detected {count} anomalous record(s) "
+                    "in the current dataset."
+                )
+
+            elif "revenue" in q and "average" in q:
+                answer = (
+                    f"Average monthly revenue in the verified dataset is "
+                    f"₹{df['monthly_revenue'].mean():,.0f}."
+                )
+
+            elif "score" in q:
+                answer = (
+                    f"Average Credit Intelligence Score is "
+                    f"{df['credit_score'].mean():.1f}/100."
+                )
+
+            elif "health" in q:
+                answer = (
+                    f"Average Financial Health Score is "
+                    f"{df['financial_health_score'].mean():.1f}/100."
+                )
+
+            else:
+                answer = (
+                    "Gemini AI is not connected yet. Configure GEMINI_API_KEY "
+                    "to enable natural-language analysis. The deterministic "
+                    "CreditLens modules remain available."
+                )
+
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+
+        if answer:
+            st.session_state.copilot_messages.append(
+                {"role": "assistant", "content": answer}
             )
 
+    # ------------------------------------------------------------
+    # Verified context preview
+    # ------------------------------------------------------------
+    with st.expander("🔎 View verified data supplied to Gemini"):
+        preview_context = build_ai_verified_context(
+            df,
+            selected_business
+        )
+        st.json(preview_context)
+        st.caption(
+            "This is the structured CreditLens context used to ground the Gemini response. "
+            "Gemini is not given unrestricted database access."
+        )
+
+    st.info(
+        "Important: CreditLens AI is an analytical copilot, not a lending decision engine. "
+        "The underlying ML model is a synthetic-data prototype and must be validated on "
+        "real-world data before production use."
+    )
 
 # ============================================================
 # FOOTER
@@ -2741,5 +2863,5 @@ st.divider()
 
 st.caption(
     "CreditLens AI • SME Credit Intelligence Prototype • "
-    "ML model trained on synthetic data • Not a lending decision"
+    "Phase 8 Gemini AI Copilot • ML model trained on synthetic data • Not a lending decision"
 )

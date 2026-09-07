@@ -7,3 +7,4 @@ xgboost
 joblib
 shap
 reportlab
+google genai

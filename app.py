@@ -4,7 +4,9 @@ import numpy as np
 import joblib
 import os
 import json
-from sklearn.ensemble import IsolationForest
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 
 # Gemini dependency for Phase 8 AI Copilot.
 try:
@@ -98,6 +100,10 @@ def load_model():
     return joblib.load("models/creditlens_model.pkl")
 
 model = load_model()
+
+# A trained candidate can be activated for the current session from Phase 10.
+if "active_model" in st.session_state:
+    model = st.session_state.active_model
 
 
 # ============================================================
@@ -327,7 +333,6 @@ def calculate_financial_health(row):
     else:
         score += 5
 
-    # Kept consistent with the current Colab prototype.
     score += 20 if row["transaction_consistency"] > 1 else 10
 
     return min(100, score)
@@ -421,7 +426,7 @@ def analyze_data(input_df):
     if df.empty:
         return None, "NO_FINANCIAL_DATA", None
 
-    # Fill missing fields with transparent prototype defaults.
+    # Fill missing fields with transparent neutral defaults.
     for col in BASE_FEATURES:
         if col not in df.columns:
             df[col] = DEFAULTS[col]
@@ -480,7 +485,7 @@ def analyze_data(input_df):
     df["data_completeness"] = completeness
     df["prediction_confidence"] = confidence
 
-    # Batch anomaly detection.
+    # Portfolio anomaly detection.
     if len(df) >= 5:
         anomaly_features = [
             "monthly_revenue",
@@ -535,7 +540,7 @@ def detect_financial_anomalies(df):
     Phase 6 anomaly engine.
 
     Combines:
-    1. Isolation Forest batch anomaly detection already used by CreditLens.
+    1. Isolation Forest anomaly detection across the analyzed portfolio.
     2. Transparent financial rules for common abnormal patterns.
     3. Relative-to-portfolio comparisons using robust medians.
     4. Severity scoring and human-readable reasons.
@@ -759,7 +764,7 @@ def detect_financial_anomalies(df):
             score += 2
             reasons.insert(
                 0,
-                "Isolation Forest identified this record as unusual relative to the analyzed batch."
+                "Isolation Forest identified this record as unusual relative to the current portfolio."
             )
             recommendations.append(
                 "Review the complete financial record before taking action."
@@ -1062,9 +1067,7 @@ def create_pdf_report(row, explanation=None):
             story.append(Spacer(1, 8))
 
     story.append(Paragraph(
-        "Prototype disclaimer: the current ML model was trained on synthetic SME data. "
-        "This report is for project/prototype analysis and should not be used as an "
-        "automated lending decision.",
+        "CreditLens provides analytical decision support. Review material findings before making lending decisions.",
         body_style
     ))
 
@@ -1160,8 +1163,7 @@ Important rules:
 3. If the supplied context does not contain enough information to answer,
    say so instead of guessing.
 4. Do not claim that the model proves fraud, default, or lending eligibility.
-5. The underlying ML model is a prototype trained on synthetic data, so remind
-   the user when discussing lending decisions or production deployment.
+5. Distinguish calculated results from recommendations and avoid presenting outputs as guaranteed lending decisions.
 6. Keep answers concise, professional, and useful for a project demonstration.
 7. Use Indian Rupee formatting when discussing rupee values.
 """
@@ -1447,6 +1449,9 @@ if "uploaded_name" not in st.session_state:
 if "raw_input_df" not in st.session_state:
     st.session_state.raw_input_df = None
 
+if "active_model_name" not in st.session_state:
+    st.session_state.active_model_name = "CreditLens default model"
+
 
 # ============================================================
 # SIDEBAR
@@ -1464,6 +1469,7 @@ page = st.sidebar.radio(
         "Anomaly Detection",
         "Historical Analysis",
         "Credit Simulator",
+        "Model Center",
         "Risk Report",
         "AI Copilot"
     ]
@@ -1535,7 +1541,7 @@ st.sidebar.download_button(
 
 st.sidebar.divider()
 st.sidebar.caption(
-    "Prototype ML model trained on synthetic data."
+    f"Active model: {st.session_state.active_model_name}"
 )
 
 
@@ -1694,7 +1700,7 @@ if page == "Dashboard":
             st.warning(
                 f"Data coverage: {coverage:.0f}% • "
                 f"Prediction confidence: {confidence}. "
-                "Missing inputs are estimated in this prototype."
+                "Missing inputs are filled with transparent neutral defaults."
             )
 
 
@@ -1976,7 +1982,7 @@ elif page == "Data Intelligence":
     st.markdown("### ⚠️ Important Data Limitation")
 
     st.warning(
-        "If important financial fields are missing, this prototype uses "
+        "If important financial fields are missing, CreditLens uses "
         "neutral fallback estimates. This allows the application to work "
         "with incomplete data, but those estimates must be replaced with "
         "validated imputation or real extracted data before production use."
@@ -1995,7 +2001,7 @@ elif page == "Anomaly Detection":
     )
 
     st.write(
-        "Phase 6 combines batch-level machine learning with transparent "
+        "Phase 6 combines machine learning with transparent "
         "financial rules to identify unusual revenue, expense, liquidity, "
         "debt and transaction patterns."
     )
@@ -2014,7 +2020,7 @@ elif page == "Anomaly Detection":
 
     if len(df) < 5:
         st.warning(
-            "Isolation Forest batch detection is most meaningful with at least "
+            "Isolation Forest detection is most meaningful with at least "
             "5 records. Phase 6 rule-based checks can still highlight unusual "
             "financial patterns."
         )
@@ -2258,7 +2264,7 @@ elif page == "Anomaly Detection":
     st.info(
         "Phase 6 note: an anomaly indicates an unusual financial pattern; "
         "it does not by itself indicate fraud, default or illegal activity. "
-        "The current Isolation Forest is trained on the analyzed batch. "
+        "Isolation Forest is applied to the current portfolio to identify unusual patterns. "
         "For production, use a separately validated anomaly model and "
         "historical transaction-level data."
     )
@@ -2522,144 +2528,270 @@ elif page == "Credit Simulator":
     )
 
     st.write(
-        "Test how changes in business finances could affect the "
-        "CreditLens score. This is a scenario tool, not a guaranteed future score."
+        "Explore financial what-if scenarios and see how the CreditLens score, "
+        "financial health, risk category and ML probability change."
     )
 
     selected = st.selectbox(
         "Select Business",
         df["business_id"].astype(str).tolist()
     )
+    base_row = df[df["business_id"].astype(str) == selected].iloc[0]
 
-    base_row = df[
-        df["business_id"].astype(str) == selected
-    ].iloc[0]
+    preset = st.radio(
+        "Scenario",
+        ["Custom", "Growth & Deleveraging", "Stress Test"],
+        horizontal=True
+    )
 
-    st.markdown("### Change Financial Conditions")
+    if preset == "Growth & Deleveraging":
+        preset_values = {
+            "monthly_revenue": float(base_row["monthly_revenue"]) * 1.15,
+            "monthly_expenses": float(base_row["monthly_expenses"]) * 0.95,
+            "total_debt": float(base_row["total_debt"]) * 0.85,
+            "monthly_emi": float(base_row["monthly_emi"]) * 0.90,
+            "late_payment_count": max(0, int(base_row["late_payment_count"]) - 1),
+            "credit_utilization": max(0.05, float(base_row["credit_utilization"]) - 0.10),
+            "revenue_growth": min(0.50, float(base_row["revenue_growth"]) + 0.08),
+            "cashflow_volatility": max(0.0, float(base_row["cashflow_volatility"]) - 0.10),
+            "average_balance": float(base_row["average_balance"]) * 1.15,
+        }
+    elif preset == "Stress Test":
+        preset_values = {
+            "monthly_revenue": float(base_row["monthly_revenue"]) * 0.85,
+            "monthly_expenses": float(base_row["monthly_expenses"]) * 1.12,
+            "total_debt": float(base_row["total_debt"]) * 1.10,
+            "monthly_emi": float(base_row["monthly_emi"]) * 1.05,
+            "late_payment_count": int(base_row["late_payment_count"]) + 2,
+            "credit_utilization": min(1.0, float(base_row["credit_utilization"]) + 0.12),
+            "revenue_growth": max(-0.50, float(base_row["revenue_growth"]) - 0.10),
+            "cashflow_volatility": min(1.0, float(base_row["cashflow_volatility"]) + 0.12),
+            "average_balance": float(base_row["average_balance"]) * 0.80,
+        }
+    else:
+        preset_values = {}
 
-    c1, c2 = st.columns(2)
-
+    st.markdown("### Scenario Inputs")
+    c1, c2, c3 = st.columns(3)
     with c1:
-        sim_revenue = st.number_input(
-            "Monthly Revenue",
-            min_value=0.0,
-            value=float(base_row["monthly_revenue"]),
-            step=10000.0
-        )
-
-        sim_expenses = st.number_input(
-            "Monthly Expenses",
-            min_value=0.0,
-            value=float(base_row["monthly_expenses"]),
-            step=10000.0
-        )
-
-        sim_debt = st.number_input(
-            "Total Debt",
-            min_value=0.0,
-            value=float(base_row["total_debt"]),
-            step=10000.0
-        )
-
-        sim_emi = st.number_input(
-            "Monthly EMI",
-            min_value=0.0,
-            value=float(base_row["monthly_emi"]),
-            step=5000.0
-        )
-
+        sim_revenue = st.number_input("Monthly Revenue", min_value=0.0, value=float(preset_values.get("monthly_revenue", base_row["monthly_revenue"])), step=10000.0)
+        sim_expenses = st.number_input("Monthly Expenses", min_value=0.0, value=float(preset_values.get("monthly_expenses", base_row["monthly_expenses"])), step=10000.0)
+        sim_debt = st.number_input("Total Debt", min_value=0.0, value=float(preset_values.get("total_debt", base_row["total_debt"])), step=10000.0)
     with c2:
-        sim_late = st.number_input(
-            "Late Payments",
-            min_value=0,
-            value=int(base_row["late_payment_count"]),
-            step=1
-        )
+        sim_emi = st.number_input("Monthly EMI", min_value=0.0, value=float(preset_values.get("monthly_emi", base_row["monthly_emi"])), step=5000.0)
+        sim_balance = st.number_input("Average Balance", min_value=0.0, value=float(preset_values.get("average_balance", base_row["average_balance"])), step=10000.0)
+        sim_late = st.number_input("Late Payments", min_value=0, value=int(preset_values.get("late_payment_count", base_row["late_payment_count"])), step=1)
+    with c3:
+        sim_util = st.slider("Credit Utilization", 0.0, 1.0, float(preset_values.get("credit_utilization", base_row["credit_utilization"])), 0.01)
+        sim_growth = st.slider("Revenue Growth", -0.50, 0.50, float(preset_values.get("revenue_growth", base_row["revenue_growth"])), 0.01)
+        sim_volatility = st.slider("Cashflow Volatility", 0.0, 1.0, float(preset_values.get("cashflow_volatility", base_row["cashflow_volatility"])), 0.01)
 
-        sim_util = st.slider(
-            "Credit Utilization",
-            0.0,
-            1.0,
-            float(base_row["credit_utilization"]),
-            0.01
-        )
-
-        sim_growth = st.slider(
-            "Revenue Growth",
-            -0.50,
-            0.50,
-            float(base_row["revenue_growth"]),
-            0.01
-        )
-
-        sim_volatility = st.slider(
-            "Cashflow Volatility",
-            0.0,
-            1.0,
-            float(base_row["cashflow_volatility"]),
-            0.01
-        )
-
-    scenario = pd.DataFrame([{
-        "monthly_revenue": sim_revenue,
-        "monthly_expenses": sim_expenses,
-        "total_debt": sim_debt,
-        "monthly_emi": sim_emi,
-        "average_balance": float(base_row["average_balance"]),
-        "late_payment_count": sim_late,
-        "total_transactions": float(base_row["total_transactions"]),
-        "avg_transaction_value": float(base_row["avg_transaction_value"]),
-        "revenue_growth": sim_growth,
-        "expense_growth": float(base_row["expense_growth"]),
-        "cashflow_volatility": sim_volatility,
-        "credit_utilization": sim_util
-    }])
-
-    scenario = engineer_features(scenario)
-
-    scenario_score = calculate_credit_score(
-        scenario.iloc[0]
+    scenario, scenario_score, scenario_health, scenario_risk, scenario_probability = simulate_financial_scenario(
+        base_row,
+        {
+            "monthly_revenue": sim_revenue,
+            "monthly_expenses": sim_expenses,
+            "total_debt": sim_debt,
+            "monthly_emi": sim_emi,
+            "average_balance": sim_balance,
+            "late_payment_count": sim_late,
+            "credit_utilization": sim_util,
+            "revenue_growth": sim_growth,
+            "cashflow_volatility": sim_volatility,
+        }
     )
 
-    scenario_health = calculate_financial_health(
-        scenario.iloc[0]
-    )
-
-    scenario_risk = risk_category(scenario_score)
-
-    scenario_probability = model.predict_proba(
-        scenario[MODEL_FEATURES]
-    )[:, 1][0]
+    scenario_row = scenario.iloc[0]
+    score_delta = scenario_score - int(base_row["credit_score"])
+    health_delta = scenario_health - int(base_row["financial_health_score"])
+    probability_delta = scenario_probability - float(base_row["ml_probability"])
 
     st.divider()
-
     s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Scenario Credit Score", f"{scenario_score}/100", delta=score_delta)
+    s2.metric("Scenario Health", f"{scenario_health}/100", delta=health_delta)
+    s3.metric("Scenario Risk", scenario_risk, delta="Improved" if score_delta > 0 else ("Worsened" if score_delta < 0 else "Unchanged"))
+    s4.metric("ML Risk Probability", f"{scenario_probability*100:.1f}%", delta=f"{probability_delta*100:+.1f} pp")
 
-    s1.metric(
-        "Scenario Credit Score",
-        f"{scenario_score}/100",
-        delta=int(scenario_score - base_row["credit_score"])
-    )
+    st.markdown("### Baseline vs Scenario")
+    comparison = pd.DataFrame({
+        "Metric": ["Credit Score", "Financial Health", "ML Risk Probability", "Cashflow", "Debt-to-Income", "Expense Ratio", "Credit Utilization"],
+        "Baseline": [
+            int(base_row["credit_score"]), int(base_row["financial_health_score"]), float(base_row["ml_probability"])*100,
+            float(base_row["cashflow"]), float(base_row["debt_to_income"]), float(base_row["expense_ratio"]), float(base_row["credit_utilization"])*100
+        ],
+        "Scenario": [
+            scenario_score, scenario_health, scenario_probability*100,
+            float(scenario_row["cashflow"]), float(scenario_row["debt_to_income"]), float(scenario_row["expense_ratio"]), float(scenario_row["credit_utilization"])*100
+        ]
+    })
+    st.dataframe(comparison.round(2), use_container_width=True, hide_index=True)
 
-    s2.metric(
-        "Scenario Health",
-        f"{scenario_health}/100",
-        delta=int(scenario_health - base_row["financial_health_score"])
-    )
-
-    s3.metric(
-        "Scenario Risk",
-        scenario_risk
-    )
-
-    s4.metric(
-        "ML Risk Probability",
-        f"{scenario_probability*100:.1f}%"
-    )
+    drivers = scenario_action_summary(base_row, scenario_row)
+    st.markdown("### Scenario Impact Drivers")
+    st.dataframe(drivers.round(3), use_container_width=True, hide_index=True)
 
     st.info(
-        "The simulator recalculates CreditLens features and runs the "
-        "trained Random Forest on the scenario."
+        "The simulator evaluates a scenario with the active CreditLens model; "
+        "it does not modify the model or its learned parameters."
+    )
+
+
+# ============================================================
+# PHASE 10 — MODEL CENTER
+# ============================================================
+
+elif page == "Model Center":
+
+    st.markdown(
+        '<div class="section-title">🧠 Phase 10 — Model Center</div>',
+        unsafe_allow_html=True
+    )
+    st.write(
+        "Train, validate and manage a supervised CreditLens risk model using a labeled "
+        "financial dataset. The active model remains unchanged until you explicitly apply a candidate."
+    )
+
+    st.markdown("### Current Model")
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("Active Model", st.session_state.active_model_name)
+    mc2.metric("Features", len(MODEL_FEATURES))
+    mc3.metric("Estimator", "Random Forest")
+
+    st.divider()
+    st.markdown("### 1. Upload Labeled Training Data")
+    st.caption(
+        "For supervised training, include a binary target such as high_risk (0/1), risk label, or default flag."
+    )
+
+    training_file = st.file_uploader(
+        "Upload CSV or Excel training data",
+        type=["csv", "xlsx", "xls"],
+        key="phase10_training_file"
+    )
+
+    if training_file is not None:
+        try:
+            if training_file.name.lower().endswith(".csv"):
+                training_df = pd.read_csv(training_file)
+            else:
+                training_df = pd.read_excel(training_file)
+
+            st.success(f"Loaded {len(training_df):,} labeled records from {training_file.name}.")
+            st.dataframe(training_df.head(10), use_container_width=True, hide_index=True)
+
+            detected_target = find_training_target(training_df)
+            target_options = list(training_df.columns)
+            default_index = target_options.index(detected_target) if detected_target in target_options else 0
+            target_col = st.selectbox("Target / risk label", target_options, index=default_index)
+
+            if st.button("🚀 Train & Validate Candidate Model", type="primary", use_container_width=True):
+                try:
+                    X_trainable, y_trainable, feature_coverage = prepare_training_data(training_df, target_col)
+                    with st.spinner("Training and validating the candidate model..."):
+                        candidate, metrics = train_and_validate_model(X_trainable, y_trainable)
+
+                    st.session_state.candidate_model = candidate
+                    st.session_state.candidate_metrics = metrics
+                    st.session_state.candidate_training_info = {
+                        "file": training_file.name,
+                        "records": len(y_trainable),
+                        "positive_rate": float(y_trainable.mean()),
+                        "feature_coverage": feature_coverage,
+                    }
+                    st.success("Candidate model trained and validated successfully.")
+                except Exception as exc:
+                    st.error(f"Training could not be completed: {exc}")
+        except Exception as exc:
+            st.error(f"Could not read the training file: {exc}")
+
+    if "candidate_model" in st.session_state and "candidate_metrics" in st.session_state:
+        st.divider()
+        st.markdown("### 2. Candidate Model Validation")
+        info = st.session_state.get("candidate_training_info", {})
+        if info:
+            st.caption(
+                f"Source: {info.get('file', 'labeled dataset')} • "
+                f"Records used: {info.get('records', 0):,} • "
+                f"Positive-class rate: {info.get('positive_rate', 0)*100:.1f}%"
+            )
+
+        metrics = st.session_state.candidate_metrics
+        metric_cols = st.columns(5)
+        for col, key in zip(metric_cols, ["Accuracy", "Precision", "Recall", "F1", "ROC-AUC"]):
+            col.metric(key, f"{metrics[key]*100:.1f}%")
+
+        cv1, cv2 = st.columns(2)
+        cv1.metric("5-Fold CV ROC-AUC", f"{metrics['CV ROC-AUC Mean']*100:.1f}%")
+        cv2.metric("CV Variation", f"±{metrics['CV ROC-AUC Std']*100:.1f} pp")
+
+        st.caption(
+            f"Validation assessment: {model_health_label(metrics['CV ROC-AUC Mean'])}. "
+            "Use the full validation metrics rather than a single score."
+        )
+
+        candidate = st.session_state.candidate_model
+        importance = pd.DataFrame({
+            "Feature": MODEL_FEATURES,
+            "Importance": candidate.feature_importances_
+        }).sort_values("Importance", ascending=False).head(12)
+
+        st.markdown("### Candidate Feature Importance")
+        st.bar_chart(importance.set_index("Feature"))
+
+        a1, a2 = st.columns(2)
+        with a1:
+            if st.button("✅ Apply Candidate to Current Session", type="primary", use_container_width=True):
+                st.session_state.active_model = candidate
+                st.session_state.active_model_name = "Validated candidate model"
+                source_df = st.session_state.raw_input_df
+                if source_df is None:
+                    source_df = demo_data()
+                analyzed, status, details = analyze_data(source_df)
+                if status == "OK":
+                    st.session_state.analysis_df = analyzed
+                    st.session_state.source_name = st.session_state.get("source_name", "Current dataset")
+                    st.success("Candidate model is now active for this session.")
+                    st.rerun()
+                else:
+                    st.error("The candidate model was not applied because the current dataset could not be analyzed.")
+        with a2:
+            model_bytes = BytesIO()
+            joblib.dump(candidate, model_bytes)
+            model_bytes.seek(0)
+            st.download_button(
+                "⬇️ Download Candidate Model",
+                data=model_bytes.getvalue(),
+                file_name="creditlens_validated_model.pkl",
+                mime="application/octet-stream",
+                use_container_width=True
+            )
+
+    st.divider()
+    st.markdown("### 3. Model Governance")
+    governance = pd.DataFrame({
+        "Control": [
+            "Active estimator",
+            "Feature set",
+            "Validation",
+            "Model change policy",
+            "Scenario behavior",
+            "Model persistence"
+        ],
+        "CreditLens behavior": [
+            type(model).__name__,
+            f"{len(MODEL_FEATURES)} engineered features",
+            "Holdout test + 5-fold cross-validation for candidates",
+            "Explicit user action required to activate a candidate",
+            "Simulator evaluates scenarios without changing parameters",
+            "Downloadable .pkl artifact for controlled deployment"
+        ]
+    })
+    st.dataframe(governance, use_container_width=True, hide_index=True)
+
+    st.info(
+        "Phase 10 separates scoring from model training: uploaded business data is analyzed by the active model, "
+        "while model changes happen only through an explicit labeled-data training and validation workflow."
     )
 
 
@@ -2736,7 +2868,7 @@ elif page == "Risk Report":
         )
 
     st.caption(
-        "Prototype report only. Not a lending decision."
+        "Analytical report for decision support."
     )
 
 
@@ -2969,8 +3101,7 @@ elif page == "AI Copilot":
 
     st.info(
         "Important: CreditLens AI is an analytical copilot, not a lending decision engine. "
-        "The underlying ML model is a synthetic-data prototype and must be validated on "
-        "real-world data before production use."
+        "Use the Phase 10 Model Center to validate or train the model with labeled business data."
     )
 
 # ============================================================
@@ -2980,6 +3111,5 @@ elif page == "AI Copilot":
 st.divider()
 
 st.caption(
-    "CreditLens AI • SME Credit Intelligence Prototype • "
-    "Phase 8 Gemini AI Copilot • ML model trained on synthetic data • Not a lending decision"
+    "CreditLens AI • SME Credit Intelligence Platform • Phases 1–10 • Decision-support analytics"
 )

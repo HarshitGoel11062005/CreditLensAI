@@ -659,12 +659,12 @@ def format_driver_value(name, value):
 # REPORT GENERATION
 # ============================================================
 
-def create_pdf_report(row):
+def create_pdf_report(row, explanation=None):
+    """Create a professional CreditLens AI PDF risk report."""
     if not REPORTLAB_AVAILABLE:
         return None
 
     buffer = BytesIO()
-
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
@@ -676,24 +676,16 @@ def create_pdf_report(row):
 
     styles = getSampleStyleSheet()
     story = []
-
     business = str(row.get("business_id", "Selected Business"))
 
-    story.append(
-        Paragraph(
-            "CreditLens AI — SME Risk Intelligence Report",
-            styles["Title"]
-        )
-    )
+    title_style = styles["Title"]
+    heading_style = styles["Heading2"]
+    body_style = styles["BodyText"]
 
-    story.append(
-        Paragraph(
-            f"Business: {business}",
-            styles["Heading2"]
-        )
-    )
-
-    story.append(Spacer(1, 12))
+    story.append(Paragraph("CreditLens AI", title_style))
+    story.append(Paragraph("SME Credit & Financial Intelligence Report", heading_style))
+    story.append(Paragraph(f"Business: {business}", body_style))
+    story.append(Spacer(1, 14))
 
     summary = [
         ["Metric", "Result"],
@@ -702,58 +694,79 @@ def create_pdf_report(row):
         ["Financial Health", f"{int(row['financial_health_score'])}/100"],
         ["ML High-Risk Probability", f"{row['ml_probability']*100:.1f}%"],
         ["Data Completeness", f"{row['data_completeness']:.0f}%"],
-        ["Prediction Confidence", str(row["prediction_confidence"])]
+        ["Prediction Confidence", str(row["prediction_confidence"])],
     ]
-
     table = Table(summary, colWidths=[230, 180])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a5f")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("PADDING", (0, 0), (-1, -1), 7)
+        ("PADDING", (0, 0), (-1, -1), 7),
     ]))
-
     story.append(table)
-    story.append(Spacer(1, 18))
+    story.append(Spacer(1, 16))
 
-    story.append(
-        Paragraph("Key Financial Indicators", styles["Heading2"])
-    )
-
+    story.append(Paragraph("Key Financial Indicators", heading_style))
     indicators = [
         ["Indicator", "Value"],
         ["Monthly Revenue", f"₹{row['monthly_revenue']:,.0f}"],
         ["Monthly Expenses", f"₹{row['monthly_expenses']:,.0f}"],
+        ["Cashflow", f"₹{row['cashflow']:,.0f}"],
         ["Total Debt", f"₹{row['total_debt']:,.0f}"],
         ["Monthly EMI", f"₹{row['monthly_emi']:,.0f}"],
         ["Debt-to-Income", f"{row['debt_to_income']:.2f}"],
         ["Expense Ratio", f"{row['expense_ratio']:.2f}"],
         ["Late Payments", str(int(row["late_payment_count"]))],
-        ["Credit Utilization", f"{row['credit_utilization']*100:.1f}%"]
+        ["Credit Utilization", f"{row['credit_utilization']*100:.1f}%"],
     ]
-
     table2 = Table(indicators, colWidths=[230, 180])
     table2.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#334155")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("PADDING", (0, 0), (-1, -1), 6)
+        ("PADDING", (0, 0), (-1, -1), 6),
     ]))
-
     story.append(table2)
-    story.append(Spacer(1, 18))
+    story.append(Spacer(1, 16))
 
-    story.append(
-        Paragraph(
-            "Prototype disclaimer: the current ML model was trained on synthetic "
-            "SME data. This report is for project/prototype analysis and should "
-            "not be used as an automated lending decision.",
-            styles["BodyText"]
-        )
-    )
+    # Phase 4 explanation in the report
+    if explanation:
+        story.append(Paragraph("Explainable AI — Key Drivers", heading_style))
+        driver_rows = [["Driver", "Assessment"]]
+        for item in explanation.get("risks", [])[:6]:
+            driver_rows.append([item["factor"], item["impact"]])
+        if len(driver_rows) == 1:
+            driver_rows.append(["No major rule-based risk driver", "Positive"])
+        driver_table = Table(driver_rows, colWidths=[300, 110])
+        driver_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#475569")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("PADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(driver_table)
+        story.append(Spacer(1, 10))
+
+        if explanation.get("positive"):
+            story.append(Paragraph("Positive Factors", heading_style))
+            for item in explanation["positive"][:6]:
+                story.append(Paragraph("• " + item, body_style))
+            story.append(Spacer(1, 8))
+
+        if explanation.get("recommendations"):
+            story.append(Paragraph("Recommended Actions", heading_style))
+            for item in explanation["recommendations"][:6]:
+                story.append(Paragraph("• " + item, body_style))
+            story.append(Spacer(1, 8))
+
+    story.append(Paragraph(
+        "Prototype disclaimer: the current ML model was trained on synthetic SME data. "
+        "This report is for project/prototype analysis and should not be used as an "
+        "automated lending decision.",
+        body_style
+    ))
 
     doc.build(story)
-
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -1586,7 +1599,7 @@ elif page == "Risk Report":
     )
 
     if REPORTLAB_AVAILABLE:
-        pdf_bytes = create_pdf_report(row)
+        pdf_bytes = create_pdf_report(row, build_explanation(row))
 
         st.download_button(
             "⬇️ Download PDF Risk Report",

@@ -1133,7 +1133,7 @@ def build_ai_verified_context(df, selected_business=None):
 
 
 def ask_creditlens_gemini(question, df, selected_business=None,
-                           model_name="gemini-2.5-flash"):
+                           model_name="gemini-3.6-flash"):
     """Ask Gemini to explain verified CreditLens results."""
     api_key = get_gemini_api_key()
     if not GEMINI_AVAILABLE:
@@ -2775,8 +2775,8 @@ elif page == "AI Copilot":
             st.success("AI Copilot connected to Gemini.")
 
     with status_col2:
-        ai_model = "gemini-2.5-flash"
-        st.caption("Model: Gemini 2.5 Flash")
+        ai_model = "gemini-3.6-flash"
+        st.caption("Model: Gemini 3.6 Flash")
 
     # ------------------------------------------------------------
     # Business context selector

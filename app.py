@@ -1599,7 +1599,7 @@ elif page == "Risk Report":
     )
 
     if REPORTLAB_AVAILABLE:
-        pdf_bytes = create_pdf_report(row, build_explanation(row))
+        pdf_bytes = create_pdf_report(row, explain_risk(row))
 
         st.download_button(
             "⬇️ Download PDF Risk Report",
